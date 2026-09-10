@@ -68,17 +68,66 @@ repository and in `helm get values`.
 **`imagePullPolicy: IfNotPresent`, not `Always`.** `Always` is right for a
 mutable `:dev` tag and wrong once a tag or a digest is pinned.
 
-**TimescaleDB pg16, not pg15.** TimescaleDB supports 13 through 18 and nothing
-here is pinned to 15. It must still be the Community build and not `-oss`:
-`init-db.sql` calls `add_retention_policy` and `add_compression_policy`, which
-are background jobs `-oss` does not have.
-
 **Validation fails the render.** Missing `trackingBaseUrl`, `rpId`,
 `rpOrigins`, `allowedOrigin` or `cdnBaseUrl` is an error rather than a default.
 Promovolve itself refuses to boot without its object store and its LLM key for
 the same reason: the alternative to a loud failure is not a working deployment,
 it is one whose symptoms point somewhere else. A wrong `trackingBaseUrl` means
 ads render and nothing is recorded.
+
+## If this is ever offered upstream
+
+Nothing here is tied to the cluster it was written for. Checked rather than
+assumed: the chart contains no address, no StorageClass name, no `hostPath`, no
+CNI or node-OS assumption. `api.persistence.storageClass` is empty, which means
+"whatever this cluster's default is".
+
+What would need changing, and what is worth arguing about:
+
+**Fork identity.** `image.registry` / `image.repository` default to this fork's
+GHCR namespace, and `Chart.yaml` names its maintainer. Both are values or
+metadata; upstream would set its own.
+
+**`postgresql.bundled` defaults to false.** Upstream's base bundles the
+database, so `true` would be the smaller diff and the friendlier first
+install. It is `false` because of how the two fail. Forget `postgresql.host`
+with `bundled: false` and the render stops with a message naming the value;
+forget `bundled: false` with a default of `true` and a second database comes
+up, the application talks to it, and the symptom is that the data is missing.
+The louder failure was preferred. This is a defensible default either way.
+
+**`api.service.type` defaults to ClusterIP, not LoadBalancer.** Charts
+conventionally do, and a LoadBalancer on a cluster with no controller stays
+Pending with no other symptom. But it does change upstream's Docker Desktop
+workflow, where LoadBalancer is what puts the port on localhost.
+
+**Resource names ignore the release name.** `promovolve.fullname` returns the
+chart name, so resources are `promovolve-api` and not `<release>-api`. That
+keeps the names the base produces — useful when moving an existing deployment
+across — at the cost of the Helm convention, and two releases in one namespace
+would collide. Upstream may well prefer the convention.
+
+**Rendering fails on missing configuration.** Some maintainers want
+`helm install` with no values to produce something; this refuses. The argument
+for refusing is in the section above.
+
+**`config.trackingBaseUrl` must end in `/v1`.** The browser-facing routes live
+under `pathPrefix("v1")` and upstream's own value includes it, so the check
+should hold — but it is a constraint the chart invents, and it would be wrong
+the day the API is mounted somewhere else.
+
+**Migration note.** `DATABASE_URL` moves from `platform-config` to the platform
+Secret, so anyone coming from the base has to add it there. A deployment that
+misses this starts and then cannot reach the database.
+
+**Demo values carried over.** `floorObservationIntervalSeconds: 60` and
+`gemini.tokensPerMinute: 1000` are upstream's base values, and upstream's own
+comments say production wants 900 (with tick counts recalibrated) and that 1000
+targets a paid key. Keeping them matches the base rather than improving on it.
+
+**Chart appVersion and image tags have to move together.** With no
+`image.*.tag` set, the tag is `.Chart.AppVersion`. Whatever publishes the
+images must bump it, or the default points at a tag that was never pushed.
 
 ## Not ported
 

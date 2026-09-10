@@ -242,9 +242,11 @@ postgresql:
   # background jobs that only the Community build has, and init-db.sql calls
   # both.
   #
-  # pg16 rather than upstream's pg15. TimescaleDB supports 13 through 18 and
-  # nothing here is pinned to 15.
-  image: timescale/timescaledb:2.17.2-pg16
+  # Upstream's tag, unchanged. TimescaleDB supports PostgreSQL 13 through 18
+  # and nothing here is pinned to 15, so a newer one works -- but "works" is
+  # not a reason to differ from the version upstream tests against, and the
+  # bundled database has no relationship to whatever an external one runs.
+  image: timescale/timescaledb:2.17.2-pg15
   maxConnections: 300
 
   persistence:
