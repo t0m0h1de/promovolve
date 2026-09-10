@@ -1,0 +1,121 @@
+{{- if .Values.postgresql.bundled }}
+{{/*
+The bundled database.
+
+Off by default. The permanent data here is the billing record, and a database
+inside a cluster that gets rebuilt is the one thing that cannot be -- so the
+deployment this chart expects points at a Postgres somewhere else.
+
+On, it is what makes `helm install` work on a fresh kind cluster with no
+preparation, which is how the chart is tested.
+
+TimescaleDB is load-bearing, not a preference: init-db.sql calls
+create_hypertable and fails on its first statement without the extension. And
+it must be the Community build -- add_retention_policy and
+add_compression_policy are background jobs that the -oss build does not have,
+and init-db.sql calls both. Community is free but is not OSI open source; the
+Promovolve source itself is Apache 2.0 and the two are not the same licence.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "promovolve.fullname" . }}-db-initdb
+  labels:
+    {{- include "promovolve.labels" . | nindent 4 }}
+data:
+  init.sql: |
+    {{- .Files.Get "files/init-db.sql" | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "promovolve.fullname" . }}-db
+  labels:
+    {{- include "promovolve.labels" . | nindent 4 }}
+spec:
+  # Headless. Nothing load-balances one Postgres, and a stable DNS name for the
+  # single pod is all the application needs.
+  clusterIP: None
+  selector:
+    app: {{ include "promovolve.fullname" . }}-db
+  ports:
+    - name: postgres
+      port: {{ .Values.postgresql.port }}
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "promovolve.fullname" . }}-db
+  labels:
+    {{- include "promovolve.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "promovolve.fullname" . }}-db
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ include "promovolve.fullname" . }}-db
+  template:
+    metadata:
+      labels:
+        app: {{ include "promovolve.fullname" . }}-db
+        {{- include "promovolve.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: timescaledb
+          image: {{ .Values.postgresql.image }}
+          # Each api replica opens several connection pools at up to 20
+          # connections each, so the default ceiling of about 100 is overrun by
+          # the api tier plus the platform -- and the symptom is "sorry, too
+          # many clients already" during entity recovery, not a slow query.
+          args: ["-c", "max_connections={{ .Values.postgresql.maxConnections }}"]
+          ports:
+            - name: postgres
+              containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: {{ .Values.secrets.db }}
+          env:
+            # A subdirectory, because the volume root carries lost+found on
+            # some StorageClasses and initdb refuses a non-empty directory.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: initdb
+              mountPath: /docker-entrypoint-initdb.d
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - {{ .Values.postgresql.user }}
+                - -d
+                - {{ .Values.postgresql.database }}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.postgresql.resources | nindent 12 }}
+      volumes:
+        - name: initdb
+          configMap:
+            name: {{ include "promovolve.fullname" . }}-db-initdb
+        {{- if not .Values.postgresql.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+  {{- if .Values.postgresql.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.postgresql.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.postgresql.persistence.size }}
+  {{- end }}
+{{- end }}

@@ -1,0 +1,360 @@
+# Promovolve.
+#
+# This chart exists because the upstream kustomize base carries GKE-shaped
+# decisions in the manifests themselves -- a LoadBalancer Service, a bundled
+# database, image names under one Docker Hub account, an imagePullSecret that
+# only a private registry needs. Deploying somewhere else meant a new overlay
+# per target, and k8s-local/ is what that looks like: three patches whose only
+# job is to undo three decisions.
+#
+# So the decisions are values here. And where upstream's comments say "change
+# these together", the chart derives one from the other instead -- an
+# instruction that can be forgotten becomes an arrangement that cannot.
+#
+# Nothing here creates a Secret. See `secrets` at the bottom.
+
+nameOverride: ""
+fullnameOverride: ""
+
+# ---------------------------------------------------------------------------
+# Images
+# ---------------------------------------------------------------------------
+#
+# Upstream points at private repositories under one Docker Hub account and so
+# needs a pull secret in every pod spec. These images are public, so
+# pullSecrets is empty and pods carry no registry credential at all.
+image:
+  registry: ghcr.io
+  repository: t0m0h1de
+
+  api:
+    name: promovolve-api
+    # Empty means .Chart.AppVersion.
+    tag: ""
+    # A digest wins over the tag when set. Deploying by digest is the only way
+    # to know what is running: upstream's own record has two occasions where a
+    # plain apply rolled the cluster back to an older build because the pin in
+    # the manifest was stale.
+    digest: ""
+
+  platform:
+    name: promovolve-platform
+    tag: ""
+    digest: ""
+
+  # IfNotPresent, not Always. Always is right for a mutable :dev tag and wrong
+  # for everything else; pin a tag or a digest and the pull policy stops
+  # mattering.
+  pullPolicy: IfNotPresent
+
+  pullSecrets: []
+
+# ---------------------------------------------------------------------------
+# Single-node mode
+# ---------------------------------------------------------------------------
+#
+# One value for what upstream spreads over five places. Setting this to true:
+#
+#   api.replicas                 -> 1
+#   the api's -Dconfig.file      -> application-single.conf
+#   bootstrap contact points     -> 1
+#   api anti-affinity            -> none
+#   the api PodDisruptionBudget  -> not created
+#
+# Upstream ships application-single.conf for exactly this and its README warns
+# that the pieces have to move together. They cannot come apart here.
+#
+# It deliberately does NOT disable persistence. Durable DData and cluster size
+# are separate questions -- see api.persistence, which has its own note.
+singleNode: false
+
+# ---------------------------------------------------------------------------
+# API tier -- the Pekko cluster
+# ---------------------------------------------------------------------------
+api:
+  # PEKKO_BOOTSTRAP_REQUIRED_CONTACT_POINTS is not a value. It is derived from
+  # this number as the majority, floor(n/2)+1, which is what upstream's comment
+  # tells a human to compute. A cluster that requires fewer than a majority can
+  # form two of itself.
+  replicas: 2
+
+  # soft | hard | none
+  #
+  # hard requires one schedulable node per replica; with fewer, the surplus
+  # pods stay Pending -- and a Pending pod that the bootstrap quorum is waiting
+  # for means the cluster never forms at all, rather than forming smaller.
+  # That failure is silent enough that upstream's own base ships soft with a
+  # comment explaining why the hard version was backed out.
+  antiAffinity: soft
+
+  logLevel: INFO
+
+  # Mounts logback-debug.xml and points the JVM at it. Upstream's base has this
+  # on and marks it TEMP; it is off here and opt-in.
+  debugLogging: false
+
+  # Percentage of the container memory limit the JVM may use for heap. The JVM
+  # default of 25% is undersized for entities plus DData plus serialization.
+  maxRAMPercentage: 50
+
+  # Pekko Cluster Bootstrap timings.
+  #
+  # Upstream's comment is explicit that these are environment tuning rather
+  # than application configuration -- a restarting pod's probes contend with
+  # JVM boot, DData recovery and Chromium warmup, and the library defaults
+  # (3s / 1s / 5s) fire before that finishes and turn a rejoin into a crash
+  # loop. Environment tuning belongs in values.
+  bootstrap:
+    probingFailureTimeout: 30s
+    probeInterval: 2s
+    stableMargin: 10s
+    # Companion to the /alive startup probe. A node whose incarnation a peer
+    # has quarantined can never finish joining, but it stays alive and nothing
+    # recycles it. This makes the JVM exit so the kubelet restarts it with a
+    # fresh UID.
+    shutdownAfterUnsuccessfulJoinSeedNodes: 120s
+
+  persistence:
+    # Durable DData (LMDB). What it holds is shard state, an exhausted-campaign
+    # filter and a serve-view cache -- all reconstructible, with the permanent
+    # data in Postgres. So this can be false, and then the chart emits no
+    # volumeClaimTemplate and sets pekko.cluster.distributed-data.durable.keys
+    # to empty so nothing tries to write where there is no volume.
+    #
+    # Left true because losing it costs a cold rebuild of shard state on every
+    # restart, which is worth 2Gi on a cluster that has storage.
+    enabled: true
+    size: 2Gi
+    # Empty uses the cluster default StorageClass. A cluster with no default
+    # and no value here gets a Pending PVC, which is the loudest of the
+    # available failures.
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+
+  # Chromium is unstable on the default 64MB /dev/shm.
+  dshmSize: 1Gi
+
+  # Request-hygiene ASN database, fetched by an init container on every start.
+  # Best-effort by design: the download exits 0 on failure and the application
+  # fails open.
+  asnDb:
+    enabled: true
+    image: curlimages/curl:8.11.1
+    url: https://iptoasn.com/data/ip2asn-combined.tsv.gz
+
+  service:
+    # ClusterIP, not LoadBalancer. Upstream's LoadBalancer is how Docker
+    # Desktop exposes a port on localhost; on a cluster reached through a
+    # tunnel or an ingress controller it either provisions something nobody
+    # asked for or stays Pending forever.
+    type: ClusterIP
+    port: 8080
+    # Pins a client to one pod. Without it a client's create, read and SSE
+    # stream scatter across replicas, and the symptom is a dashboard that
+    # needs a refresh to show a write it just made.
+    sessionAffinity: ClientIP
+    sessionAffinityTimeoutSeconds: 10800
+    annotations: {}
+
+  podDisruptionBudget:
+    # Paces voluntary evictions so a node drain takes the replicas one at a
+    # time and the cluster keeps DData majority through it. Not created in
+    # singleNode mode, where a PDB over one pod either blocks drains or does
+    # nothing.
+    enabled: true
+    maxUnavailable: 1
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 1536Mi
+    limits:
+      memory: 2048Mi
+
+  nodeSelector: {}
+  tolerations: []
+  podAnnotations: {}
+
+# ---------------------------------------------------------------------------
+# Platform tier -- the Go dashboard / BFF
+# ---------------------------------------------------------------------------
+platform:
+  # Must stay 1 until in-flight WebAuthn ceremony state moves out of process
+  # memory. Exposed rather than hidden, because a value with the reason
+  # attached is easier to find than a hard-coded 1.
+  replicas: 1
+
+  service:
+    type: ClusterIP
+    port: 9090
+    annotations: {}
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
+  nodeSelector: {}
+  tolerations: []
+  podAnnotations: {}
+
+# ---------------------------------------------------------------------------
+# Not here: the singleton tier
+# ---------------------------------------------------------------------------
+#
+# Upstream ships a dedicated StatefulSet carrying roles [singleton, entity],
+# consolidated into the api pods in 2026-07 and parked at replicas 0. It is
+# kept there for real multi-node infrastructure, where two api pods plus this
+# one give an odd entity count -- the shape split-brain resolution wants.
+#
+# The chart does not template it, and there is deliberately no
+# `singleton.enabled` value that quietly does nothing. Where this chart is
+# aimed there is one worker node, and a third JVM on it protects nothing.
+#
+# Porting it is a small job -- the StatefulSet differs from the api one in its
+# roles overlay, the absence of an HTTP port and the absence of a Service.
+
+# ---------------------------------------------------------------------------
+# PostgreSQL
+# ---------------------------------------------------------------------------
+postgresql:
+  # false points the application at a database somewhere else and creates
+  # nothing. That is the deployment this chart expects: the permanent data is
+  # the billing record, and a database inside a cluster that gets rebuilt is
+  # the one thing that cannot be.
+  #
+  # true brings up the StatefulSet upstream ships, which is what makes
+  # `helm install` on kind work with no preparation.
+  bundled: false
+
+  # Ignored when bundled is true, which uses the chart's own Service name.
+  host: ""
+  port: 5432
+  database: promovolve
+  user: promovolve
+
+  # TimescaleDB, not plain PostgreSQL: init-db.sql calls create_hypertable and
+  # fails on its first statement without the extension. And the Community
+  # build, not -oss -- add_retention_policy and add_compression_policy are
+  # background jobs that only the Community build has, and init-db.sql calls
+  # both.
+  #
+  # pg16 rather than upstream's pg15. TimescaleDB supports 13 through 18 and
+  # nothing here is pinned to 15.
+  image: timescale/timescaledb:2.17.2-pg16
+  maxConnections: 300
+
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: ""
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 512Mi
+    limits:
+      memory: 2Gi
+
+# ---------------------------------------------------------------------------
+# Application configuration
+# ---------------------------------------------------------------------------
+#
+# Public URLs, and the values a deployment has to decide. None of these are
+# secret; they are in a ConfigMap so a deployment is reproducible from what is
+# committed.
+config:
+  # The R2 / CDN origin creative assets are served from. Must be reachable by
+  # the VIEWER's browser.
+  cdnBaseUrl: ""
+
+  # Where the viewer's browser POSTs impression, click and CTA beacons. The
+  # server embeds this into every served banner, so it has to be the public
+  # host and it has to include the /v1 prefix. Wrong here and ads render while
+  # nothing is recorded -- which looks like working software.
+  trackingBaseUrl: ""
+
+  # The banner web component's public URL. Empty means the custom element never
+  # upgrades and banners render blank.
+  bannerScriptUrl: ""
+
+  # The one origin the BFF echoes in Access-Control-Allow-Origin. Empty falls
+  # back to "*", which is the permissive local-development behaviour and not
+  # what a deployment wants.
+  allowedOrigin: ""
+
+  # WebAuthn Relying Party.
+  #
+  # Passkeys are bound to rpId permanently: change it and every registered
+  # passkey stops working. Do not run the first-admin setup against a hostname
+  # you are trying out.
+  rpId: ""
+  rpOrigins: ""
+
+  enableTestRoutes: false
+
+  # LP-worker shard count, addressed by hash(siteId) % N.
+  crawlerNumWorkers: 4
+
+  # Floor-optimizer observation cadence. The sweep's duty cycle is counted in
+  # ticks, so the production default of 900 makes one sweep take eight hours
+  # and the dashboard read as frozen. 60 keeps it watchable. Production wants
+  # 900 with the tick counts recalibrated, not this value.
+  floorObservationIntervalSeconds: 60
+
+  # Lets headless Chromium start as root inside the container.
+  chromiumNoSandbox: true
+
+  # Sized for a paid Gemini key. The free tier is 8 RPM / burst 5, and leaving
+  # these at the paid numbers makes a multi-page crawl queue past the 30s
+  # acquire deadline -- after which pages fall back to nine generic categories
+  # at confidence 0.25. That is a silent misclassification, not an error.
+  gemini:
+    tokensPerMinute: 1000
+    burst: 50
+
+  # Anything the chart does not name, added to the api ConfigMap verbatim.
+  extraEnv: {}
+
+  # The same, for the platform ConfigMap.
+  platformExtraEnv: {}
+
+# ---------------------------------------------------------------------------
+# Secrets
+# ---------------------------------------------------------------------------
+#
+# The chart creates none of these. It reads the names of Secrets that already
+# exist, and something else -- Terraform, an operator, a human -- owns them.
+#
+# Upstream's base commits db-secret with POSTGRES_PASSWORD=promovolve as a
+# literal. A chart that generated secrets would either repeat that or ask for
+# passwords in values.yaml, and values.yaml ends up in a Git repository and in
+# `helm get values`.
+#
+# Expected contents:
+#
+#   api        JDBC_PASSWORD, GEMINI_API_KEY (or OPENAI_/ANTHROPIC_),
+#              R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY,
+#              R2_BUCKET, INTERNAL_API_KEY
+#
+#   platform   JWT_SECRET, DATABASE_URL, INTERNAL_API_KEY
+#
+#              DATABASE_URL is here rather than in the ConfigMap because it
+#              carries the password. Upstream puts it in platform-config,
+#              where anyone who can read a ConfigMap can read the database
+#              credential -- and read access to ConfigMaps is granted far more
+#              freely than read access to Secrets.
+#
+#              INTERNAL_API_KEY must be the same string in both. One side only
+#              and /v1/internal/* is refused, which surfaces as settlement
+#              quietly not happening.
+#
+#   db         POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB.
+#              Only read when postgresql.bundled is true.
+secrets:
+  api: api-secret
+  platform: platform-secret
+  db: db-secret
