@@ -1,0 +1,26 @@
+apiVersion: v2
+name: promovolve
+description: >-
+  Promovolve — a Scala/Pekko ad server and its Go dashboard, packaged so the
+  same manifests deploy to more than one kind of cluster.
+type: application
+
+# Chart version. Bumped when the templates change.
+version: 0.1.0
+
+# The application version the default image tags point at. Override
+# image.api.tag / image.platform.tag to deploy something else; pin
+# image.*.digest to deploy something exactly.
+appVersion: "0.1.0"
+
+home: https://github.com/promovolve/promovolve
+sources:
+  - https://github.com/promovolve/promovolve
+
+maintainers:
+  - name: t0m0h1de
+
+keywords:
+  - adtech
+  - pekko
+  - scala

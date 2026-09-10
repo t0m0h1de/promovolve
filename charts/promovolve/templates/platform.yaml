@@ -1,0 +1,97 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "promovolve.fullname" . }}-platform
+  labels:
+    {{- include "promovolve.labels" . | nindent 4 }}
+  {{- with .Values.platform.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.platform.service.type }}
+  selector:
+    {{- include "promovolve.platform.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.platform.service.port }}
+      targetPort: http
+---
+{{/*
+The Go dashboard and BFF. Durable state is in Postgres, so a Deployment is
+right -- with the one exception that keeps replicas at 1: in-flight WebAuthn
+ceremony state is held in process memory, so a ceremony begun on one pod cannot
+be completed on another.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "promovolve.fullname" . }}-platform
+  labels:
+    {{- include "promovolve.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.platform.replicas }}
+  selector:
+    matchLabels:
+      {{- include "promovolve.platform.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "promovolve.platform.selectorLabels" . | nindent 8 }}
+        {{- include "promovolve.labels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/platform-config.yaml") . | sha256sum }}
+        {{- with .Values.platform.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.platform.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.platform.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: platform
+          image: {{ include "promovolve.platform.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.platform.service.port }}
+          env:
+            # Read from the api ConfigMap rather than repeated here, so the two
+            # tiers cannot disagree about where assets come from.
+            #
+            # /proxy/asset/{hash}, the same-origin proxy the creative designer's
+            # auto-crop uses, needs CDN_BASE_URL. The designer page injects
+            # BANNER_SCRIPT_URL as window.__DESIGNER__.bannerScriptUrl; if it is
+            # empty the custom element never upgrades and the banner renders
+            # blank rather than failing.
+            - name: CDN_BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "promovolve.fullname" . }}-api-config
+                  key: CDN_BASE_URL
+            - name: BANNER_SCRIPT_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "promovolve.fullname" . }}-api-config
+                  key: BANNER_SCRIPT_URL
+          envFrom:
+            - configMapRef:
+                name: {{ include "promovolve.fullname" . }}-platform-config
+            - secretRef:
+                name: {{ .Values.secrets.platform }}
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.platform.resources | nindent 12 }}
