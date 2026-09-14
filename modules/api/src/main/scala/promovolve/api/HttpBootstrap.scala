@@ -100,9 +100,24 @@ object HttpBootstrap {
       // CDN base URL for asset URLs
       val cdnBase = appConfig.getString("cdn-base-url")
 
-      // URL publisher browsers, the dashboard, and the crawler's Playwright
-      // all fetch the <expandable-magazine-banner> web component from.
+      // URL publisher browsers and the dashboard fetch the
+      // <expandable-magazine-banner> web component from. Embedded in served
+      // banners, so it has to be reachable by the reader.
       val bannerScriptUrl = appConfig.getString("banner-script-url")
+
+      // The URL the SERVER fetches the same component from, for
+      // LPAnalyzer.renderBanner's headless render.
+      //
+      // Empty falls back to the public URL, which is what upstream did and
+      // what most deployments want. It is separable because the two fetches
+      // have different reachability: the reader's browser has whatever
+      // credentials the public path requires, and a Chromium inside the pod
+      // has none. Where the public URL is behind an authenticating proxy,
+      // sharing it means the render silently screenshots a login page.
+      val bannerScriptUrlInternal = {
+        val configured = appConfig.getString("banner-script-url-internal")
+        if (configured.nonEmpty) configured else bannerScriptUrl
+      }
 
       // Image storage: R2 is required. No in-memory fallback — it loses
       // creatives on restart and silently masks a misconfigured deploy.
@@ -329,8 +344,10 @@ object HttpBootstrap {
 
       // LP Analyzer (Playwright-based section extraction + banner screenshots)
       val lpAnalyzer = try {
-        val analyzer = new promovolve.browser.LPAnalyzer(bannerScriptUrl, browserPool)
-        system.log.info("LPAnalyzer enabled (Playwright via BrowserSessionPool), banner-script-url={}", bannerScriptUrl)
+        val analyzer = new promovolve.browser.LPAnalyzer(bannerScriptUrlInternal, browserPool)
+        system.log.info(
+          "LPAnalyzer enabled (Playwright via BrowserSessionPool), banner-script-url={}",
+          bannerScriptUrlInternal)
         Some(analyzer)
       } catch {
         case ex: Exception =>
