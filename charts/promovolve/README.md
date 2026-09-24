@@ -129,6 +129,13 @@ targets a paid key. Keeping them matches the base rather than improving on it.
 `image.*.tag` set, the tag is `.Chart.AppVersion`. Whatever publishes the
 images must bump it, or the default points at a tag that was never pushed.
 
+The `Images` workflow builds both images without publishing on pull requests.
+On `main`, it publishes the mutable `main` tag and an immutable `sha-<commit>`
+tag. A pushed `vX.Y.Z` tag publishes `X.Y.Z` and the same immutable SHA tag.
+For a chart release, set `appVersion` to the matching image version before
+publishing the chart. GHCR package visibility must be set to public after the
+first package is created; the workflow does not change package access.
+
 ## Not ported
 
 **The singleton tier.** Upstream keeps a dedicated `[singleton, entity]` pod at
