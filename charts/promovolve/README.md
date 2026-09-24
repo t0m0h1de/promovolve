@@ -133,8 +133,13 @@ The `Images` workflow builds both images without publishing on pull requests.
 On `main`, it publishes the mutable `main` tag and an immutable `sha-<commit>`
 tag. A pushed `vX.Y.Z` tag publishes `X.Y.Z` and the same immutable SHA tag.
 For a chart release, set `appVersion` to the matching image version before
-publishing the chart. GHCR package visibility must be set to public after the
-first package is created; the workflow does not change package access.
+publishing the chart. Bump `version` and `appVersion` together, merge the
+change, then push a matching `vX.Y.Z` tag. The image workflow publishes both
+images first; only after they succeed does it package and push the chart to
+`oci://ghcr.io/<owner>/charts/promovolve`. The release fails if either chart
+version differs from the tag. GHCR package visibility must be set to public
+after the first package is created; the workflow does not change package
+access.
 
 ## Not ported
 
