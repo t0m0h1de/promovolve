@@ -1,0 +1,35 @@
+{{/*
+Public configuration for the platform tier.
+
+DATABASE_URL is NOT here. Upstream puts it in this ConfigMap, embedded
+credentials and all, which makes the database password readable by anything
+that can read a ConfigMap -- and read access to ConfigMaps is granted much more
+freely than read access to Secrets. It belongs in the Secret named by
+.Values.secrets.platform.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "promovolve.fullname" . }}-platform-config
+  labels:
+    {{- include "promovolve.labels" . | nindent 4 }}
+data:
+  LISTEN_ADDR: ":{{ .Values.platform.service.port }}"
+  CORE_API_URL: http://{{ include "promovolve.fullname" . }}-api:{{ .Values.api.service.port }}
+
+  # The one origin the BFF echoes in Access-Control-Allow-Origin. It also adds
+  # HSTS, X-Frame-Options and nosniff on every response. Empty falls back to
+  # "*", which is local-development behaviour.
+  ALLOWED_ORIGIN: {{ .Values.config.allowedOrigin | quote }}
+
+  # WebAuthn Relying Party. Passkeys are bound to RP_ID permanently: changing it
+  # invalidates every passkey already registered. A non-localhost RP_ID also
+  # marks session cookies Secure.
+  #
+  # DEV_AUTH is deliberately never set, here or anywhere: password authentication
+  # stays off in a deployment.
+  RP_ID: {{ .Values.config.rpId | quote }}
+  RP_ORIGINS: {{ .Values.config.rpOrigins | quote }}
+  {{- range $k, $v := .Values.config.platformExtraEnv }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}

@@ -1,0 +1,239 @@
+{{/*
+promovolve.api.Main -- the Pekko cluster.
+
+A StatefulSet rather than a Deployment: each pod needs a stable identity and
+its own durable DData volume, and Artery addresses peers by pod IP.
+
+The replicas form ONE cluster through Pekko Management and Cluster Bootstrap
+using Kubernetes API discovery. Sharded entities distribute across them; the
+cluster singletons run on one.
+*/}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "promovolve.fullname" . }}-api
+  labels:
+    {{- include "promovolve.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "promovolve.fullname" . }}-api-headless
+  replicas: {{ include "promovolve.api.replicas" . }}
+  # Parallel: the pods have to see each other to form a cluster, and OrderedReady
+  # waits for pod 0 to be Ready first -- which it cannot become, because
+  # readiness means cluster membership and there is nobody to form a cluster
+  # with. Ordered startup deadlocks bootstrap.
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "promovolve.api.selectorLabels" . | nindent 6 }}
+      tier: app
+  template:
+    metadata:
+      labels:
+        {{- include "promovolve.api.selectorLabels" . | nindent 8 }}
+        # Shared discovery label plus the tier. Cluster Bootstrap selects on
+        # the first; the Service selects on both, because only app-tier pods
+        # serve HTTP.
+        tier: app
+        {{- include "promovolve.labels" . | nindent 8 }}
+      annotations:
+        # Kustomize appends a content hash to a generated ConfigMap's name, so
+        # editing config rolls the pods. Helm does not, so the checksum goes
+        # here -- without it a config change updates the ConfigMap and leaves
+        # every running pod on the old content.
+        checksum/config: {{ include (print $.Template.BasePath "/api-config.yaml") . | sha256sum }}
+        {{- with .Values.api.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "promovolve.fullname" . }}-api
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if ne (include "promovolve.api.antiAffinity" .) "none" }}
+      affinity:
+        podAntiAffinity:
+          {{- if eq (include "promovolve.api.antiAffinity" .) "hard" }}
+          # One node per replica, so a node failure costs at most one member and
+          # the majority holds. REQUIRES at least as many schedulable nodes as
+          # replicas: with fewer, the surplus pods stay Pending -- and because
+          # bootstrap waits for a majority of contact points, the cluster then
+          # never forms at all rather than forming smaller.
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{- include "promovolve.api.selectorLabels" . | nindent 18 }}
+                  tier: app
+          {{- else }}
+          # Prefer spreading across nodes, but let the pods schedule anyway.
+          # The right setting where there are fewer schedulable nodes than
+          # replicas, which is the usual case outside real multi-node
+          # infrastructure.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "promovolve.api.selectorLabels" . | nindent 20 }}
+                    tier: app
+          {{- end }}
+      {{- end }}
+      {{- if .Values.api.asnDb.enabled }}
+      initContainers:
+        # Fetches the ASN database request hygiene uses to flag datacenter
+        # traffic. Best-effort by design: it exits 0 even on failure and the
+        # application fails open, with the rate gate and the bot-UA matcher
+        # still running. Re-downloaded every start, so it never goes stale and
+        # never bloats the image.
+        - name: fetch-asn-db
+          image: {{ .Values.api.asnDb.image }}
+          command:
+            - sh
+            - -c
+            - >-
+              curl -fsSL --max-time 90 {{ .Values.api.asnDb.url }}
+              -o /asn/ip2asn-combined.tsv.gz
+              || echo "ASN db download failed -- request hygiene fails open"
+          volumeMounts:
+            - name: asn-db
+              mountPath: /asn
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+      {{- end }}
+      containers:
+        - name: api
+          image: {{ include "promovolve.api.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.api.service.port }}
+            - name: management
+              containerPort: 8558
+            - name: remoting
+              containerPort: 25520
+          env:
+            - name: JAVA_TOOL_OPTIONS
+              value: {{ include "promovolve.api.javaToolOptions" . | quote }}
+            # Pekko's own membership and split-brain logging goes through its
+            # DefaultLogger straight to stdout, never through logback, so
+            # logback-debug.xml cannot unmute it. This is the only knob that
+            # does.
+            - name: LOG_LEVEL
+              value: {{ .Values.api.logLevel | quote }}
+            # Artery and management must advertise the pod IP so peers can
+            # reach this node, while binding on all interfaces.
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: PEKKO_HOST
+              value: "$(POD_IP)"
+            - name: PEKKO_BIND_HOST
+              value: "0.0.0.0"
+            - name: PEKKO_MGMT_HOST
+              value: "$(POD_IP)"
+            - name: PEKKO_CLUSTER_BOOTSTRAP
+              value: "on"
+            {{- if .Values.api.asnDb.enabled }}
+            - name: FRAUD_ASN_DB_PATH
+              value: /asn/ip2asn-combined.tsv.gz
+            {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "promovolve.fullname" . }}-api-config
+            - secretRef:
+                name: {{ .Values.secrets.api }}
+          volumeMounts:
+            - name: ddata
+              mountPath: /data
+            - name: dshm
+              mountPath: /dev/shm
+            - name: app-conf
+              mountPath: /conf
+              readOnly: true
+            {{- if .Values.api.asnDb.enabled }}
+            - name: asn-db
+              mountPath: /asn
+              readOnly: true
+            {{- end }}
+          startupProbe:
+            # /alive (the process is up), NOT /ready (it is a cluster member).
+            # Gating startup on membership means the kubelet kills a healthy JVM
+            # that is mid-rejoin whenever cluster formation is slow, which
+            # resets bootstrap from scratch and turns one downing into a restart
+            # loop. A pod that cannot join stays Running and NotReady instead,
+            # with readiness keeping traffic away.
+            httpGet:
+              path: /alive
+              port: management
+            periodSeconds: 5
+            failureThreshold: 90
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: management
+            periodSeconds: 10
+            # Room to answer while the JVM replays remember-entities shards.
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /alive
+              port: management
+            periodSeconds: 15
+            # During a rollout every node replays its shards at once and a
+            # CPU-starved JVM cannot answer within the 1s default; the default
+            # three-miss threshold then kills the pod mid-replay, the DData
+            # quorum never settles, and it loops. 5s and six misses is roughly
+            # 90 seconds of grace.
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+      volumes:
+        # Chromium is unstable on the default 64MB /dev/shm.
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.api.dshmSize }}
+        {{- if .Values.api.asnDb.enabled }}
+        - name: asn-db
+          emptyDir:
+            sizeLimit: 64Mi
+        {{- end }}
+        - name: app-conf
+          configMap:
+            name: {{ include "promovolve.fullname" . }}-app-conf
+        {{- if not .Values.api.persistence.enabled }}
+        # No PVC. The overlay mounted above empties durable.keys to match, so
+        # nothing writes here expecting it to survive.
+        - name: ddata
+          emptyDir: {}
+        {{- end }}
+  {{- if .Values.api.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: ddata
+      spec:
+        accessModes:
+          {{- toYaml .Values.api.persistence.accessModes | nindent 10 }}
+        {{- with .Values.api.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.api.persistence.size }}
+  {{- end }}

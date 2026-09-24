@@ -1,0 +1,74 @@
+{{/*
+The api Service.
+
+ClusterIP by default. Upstream ships LoadBalancer because that is how Docker
+Desktop puts a port on localhost; on a cluster reached through a tunnel or an
+ingress controller it either provisions a load balancer nobody asked for or
+stays Pending forever.
+
+Only 8080 is exposed. 8558 (Pekko Management) and 25520 (Artery) stay off the
+Service on purpose -- 8558 can alter cluster membership and has no
+authentication, and Cluster Bootstrap reaches it pod-to-pod without a Service.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "promovolve.fullname" . }}-api
+  labels:
+    {{- include "promovolve.labels" . | nindent 4 }}
+  {{- with .Values.api.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.api.service.type }}
+  {{- if .Values.api.service.sessionAffinity }}
+  # Pins a client to one pod. Without it a client's create, read and SSE stream
+  # scatter across replicas: the dashboard does not see a write it just made,
+  # and the live-event stream attaches to a pod that is not producing the
+  # events. Browser ad-serve traffic still spreads, having varied source IPs.
+  sessionAffinity: {{ .Values.api.service.sessionAffinity }}
+  {{- if eq .Values.api.service.sessionAffinity "ClientIP" }}
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: {{ .Values.api.service.sessionAffinityTimeoutSeconds }}
+  {{- end }}
+  {{- end }}
+  selector:
+    {{- include "promovolve.api.selectorLabels" . | nindent 4 }}
+    tier: app
+  ports:
+    - name: http
+      port: {{ .Values.api.service.port }}
+      targetPort: http
+---
+{{/*
+A headless Service for the StatefulSet's stable network identity. Upstream's
+StatefulSet names one in serviceName but the base does not create it, so the
+per-pod DNS records it implies do not exist.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "promovolve.fullname" . }}-api-headless
+  labels:
+    {{- include "promovolve.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  # Peers must be addressable before they are Ready: readiness here means
+  # "is a cluster member", and a pod cannot become a member until its peers
+  # can reach it.
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "promovolve.api.selectorLabels" . | nindent 4 }}
+    tier: app
+  ports:
+    - name: http
+      port: {{ .Values.api.service.port }}
+      targetPort: http
+    - name: management
+      port: 8558
+      targetPort: management
+    - name: remoting
+      port: 25520
+      targetPort: remoting
