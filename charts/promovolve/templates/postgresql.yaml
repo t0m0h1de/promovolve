@@ -61,9 +61,17 @@ spec:
         app: {{ include "promovolve.fullname" . }}-db
         {{- include "promovolve.labels" . | nindent 8 }}
     spec:
+      {{- with .Values.postgresql.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: timescaledb
           image: {{ .Values.postgresql.image }}
+          {{- with .Values.postgresql.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           # Each api replica opens several connection pools at up to 20
           # connections each, so the default ceiling of about 100 is overrun by
           # the api tier plus the platform -- and the symptom is "sorry, too
