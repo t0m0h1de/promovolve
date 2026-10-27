@@ -158,6 +158,18 @@ version differs from the tag. GHCR package visibility must be set to public
 after the first package is created; the workflow does not change package
 access.
 
+**Releases from this fork carry `-homelab`.** `v0.1.1-homelab` publishes chart
+`0.1.1-homelab` and images tagged `0.1.1-homelab`. The suffix is what keeps
+them apart from upstream: upstream tags no application release today, and
+when it does, a `v0.1.1` of its own would otherwise name different code under
+the same version. Keep bumping the number as before and always add the suffix.
+`v0.1.0`, the first release, predates this and has none.
+
+Semver reads the suffix as a pre-release, so `0.1.1-homelab` sorts after
+`0.1.0` and before `0.1.2-homelab` -- and before an upstream `0.1.1`, a
+comparison that never comes up, since the two are published to different
+registries.
+
 ## Not ported
 
 **The singleton tier.** Upstream keeps a dedicated `[singleton, entity]` pod at
