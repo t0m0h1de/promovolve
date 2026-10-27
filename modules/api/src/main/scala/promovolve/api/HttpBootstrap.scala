@@ -100,18 +100,42 @@ object HttpBootstrap {
       // CDN base URL for asset URLs
       val cdnBase = appConfig.getString("cdn-base-url")
 
-      // URL publisher browsers, the dashboard, and the crawler's Playwright
-      // all fetch the <expandable-magazine-banner> web component from.
+      // URL publisher browsers and the dashboard fetch the
+      // <expandable-magazine-banner> web component from. Embedded in served
+      // banners, so it has to be reachable by the reader.
       val bannerScriptUrl = appConfig.getString("banner-script-url")
 
-      // Image storage: R2 is required. No in-memory fallback — it loses
-      // creatives on restart and silently masks a misconfigured deploy.
+      // The URL the SERVER fetches the same component from, for
+      // LPAnalyzer.renderBanner's headless render.
+      //
+      // Empty falls back to the public URL, which is what upstream did and
+      // what most deployments want. It is separable because the two fetches
+      // have different reachability: the reader's browser has whatever
+      // credentials the public path requires, and a Chromium inside the pod
+      // has none. Where the public URL is behind an authenticating proxy,
+      // sharing it means the render silently screenshots a login page.
+      val bannerScriptUrlInternal = {
+        val configured = appConfig.getString("banner-script-url-internal")
+        if (configured.nonEmpty) configured else bannerScriptUrl
+      }
+
+      // Image storage is required. No in-memory fallback — it loses creatives
+      // on restart and silently masks a misconfigured deploy.
+      //
+      // Any S3-compatible server will do; R2 is the default and the only one
+      // that needs no endpoint. S3_ENDPOINT_URL changes where the bytes go,
+      // not whether they are required to go somewhere.
       val imageStorage: ImageStorage = R2ImageStorage.fromEnv()(using system).getOrElse {
         throw new IllegalStateException(
-          "R2 not configured. Set R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, and R2_BUCKET."
+          "Object storage not configured. Set R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY " +
+          "and R2_BUCKET, plus either R2_ACCOUNT_ID (Cloudflare R2) or " +
+          "S3_ENDPOINT_URL (any other S3-compatible server)."
         )
       }
-      val storageType = "R2 (Cloudflare)"
+      val storageType = sys.env.get("S3_ENDPOINT_URL").map(_.trim).filter(_.nonEmpty) match {
+        case Some(url) => s"S3-compatible ($url)"
+        case None      => "R2 (Cloudflare)"
+      }
 
       // Database-backed repos for creative storage (required)
       // NOTE: creativeRepo is passed in from ClusterBootstrap.Repositories to ensure
@@ -329,8 +353,10 @@ object HttpBootstrap {
 
       // LP Analyzer (Playwright-based section extraction + banner screenshots)
       val lpAnalyzer = try {
-        val analyzer = new promovolve.browser.LPAnalyzer(bannerScriptUrl, browserPool)
-        system.log.info("LPAnalyzer enabled (Playwright via BrowserSessionPool), banner-script-url={}", bannerScriptUrl)
+        val analyzer = new promovolve.browser.LPAnalyzer(bannerScriptUrlInternal, browserPool)
+        system.log.info(
+          "LPAnalyzer enabled (Playwright via BrowserSessionPool), banner-script-url={}",
+          bannerScriptUrlInternal)
         Some(analyzer)
       } catch {
         case ex: Exception =>

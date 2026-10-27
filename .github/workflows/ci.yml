@@ -21,6 +21,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  helm-chart:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.18.4
+      - name: Check copied source files
+        run: |
+          ./charts/sync-files.sh
+          git diff --exit-code -- charts/promovolve/files/
+      - name: Lint and render chart
+        run: |
+          helm lint charts/promovolve \
+            --set config.cdnBaseUrl=https://cdn.example.org \
+            --set config.trackingBaseUrl=https://ads.example.org/v1 \
+            --set config.allowedOrigin=https://promovolve.example.org \
+            --set config.rpId=promovolve.example.org \
+            --set config.rpOrigins=https://promovolve.example.org \
+            --set postgresql.host=postgres.example.org
+          helm template promovolve charts/promovolve --namespace promovolve \
+            --set config.cdnBaseUrl=https://cdn.example.org \
+            --set config.trackingBaseUrl=https://ads.example.org/v1 \
+            --set config.allowedOrigin=https://promovolve.example.org \
+            --set config.rpId=promovolve.example.org \
+            --set config.rpOrigins=https://promovolve.example.org \
+            --set postgresql.host=postgres.example.org >/dev/null
+
   scala:
     name: Scala core (sbt)
     runs-on: ubuntu-latest

@@ -1,0 +1,38 @@
+{{/*
+Pekko Cluster Bootstrap discovers peers by asking the Kubernetes API for pods
+matching a label selector, so the api ServiceAccount needs to read pods in this
+namespace. Scoped to a Role, not a ClusterRole: discovery never looks outside
+the namespace it runs in.
+*/}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "promovolve.fullname" . }}-api
+  labels:
+    {{- include "promovolve.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "promovolve.fullname" . }}-api-pod-reader
+  labels:
+    {{- include "promovolve.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "promovolve.fullname" . }}-api-pod-reader
+  labels:
+    {{- include "promovolve.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "promovolve.fullname" . }}-api-pod-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "promovolve.fullname" . }}-api
+    namespace: {{ .Release.Namespace }}

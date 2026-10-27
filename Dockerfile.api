@@ -54,6 +54,11 @@ ENV PATH=$JAVA_HOME/bin:$PATH
 WORKDIR /app
 COPY --from=build /src/modules/api/target/universal/stage/ /app/
 
+# sbt-native-packager writes the launcher 0744: executable by its owner, root,
+# and nobody else. 0755 lets the container run as pwuser (uid 1000, from the
+# Playwright base), as the Helm chart does. Running as root is unaffected.
+RUN chmod 0755 /app/bin/api
+
 # DData (LMDB) lives here; mount a PVC at this path in K8s.
 ENV DDATA_DIR=/data/ddata
 RUN mkdir -p /data/ddata

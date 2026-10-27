@@ -1,0 +1,26 @@
+{{- if and .Values.api.podDisruptionBudget.enabled (not .Values.singleNode) }}
+{{/*
+Paces voluntary evictions so a node drain takes the api pods one at a time,
+waiting for each to be Ready before taking the next, and the cluster keeps
+DData majority through the whole drain. Without it a drain evicts every replica
+at once: a full cold start, a window where nothing serves, and the shard-wedge
+risk that comes with it.
+
+Not created in singleNode mode. Over a single pod, minAvailable: 1 stalls node
+upgrades until the platform force-drains, and maxUnavailable: 1 does nothing.
+The database and the singleton tier are deliberately left without one for the
+same reason.
+*/}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "promovolve.fullname" . }}-api
+  labels:
+    {{- include "promovolve.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.api.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "promovolve.api.selectorLabels" . | nindent 6 }}
+      tier: app
+{{- end }}

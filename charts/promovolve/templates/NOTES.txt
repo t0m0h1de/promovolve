@@ -1,0 +1,39 @@
+{{ .Chart.Name }} {{ .Chart.Version }} installed as {{ .Release.Name }} in {{ .Release.Namespace }}.
+
+  api        {{ include "promovolve.api.replicas" . }} replica(s), bootstrap needs {{ include "promovolve.api.requiredContactPoints" . }} contact point(s)
+  overlay    {{ include "promovolve.api.configFile" . }}
+  platform   {{ .Values.platform.replicas }} replica
+  database   {{ if .Values.postgresql.bundled }}bundled ({{ .Values.postgresql.image }}){{ else }}external, {{ include "promovolve.postgresql.host" . }}:{{ .Values.postgresql.port }}{{ end }}
+  DData      {{ if .Values.api.persistence.enabled }}persistent, {{ .Values.api.persistence.size }} per replica{{ else }}emptyDir -- durable.keys emptied to match{{ end }}
+
+The chart creates no Secrets. These must exist already:
+
+  {{ .Values.secrets.api }}
+  {{ .Values.secrets.platform }}
+{{- if .Values.postgresql.bundled }}
+  {{ .Values.secrets.db }}
+{{- end }}
+
+Check that the cluster formed before anything else:
+
+  kubectl -n {{ .Release.Namespace }} get pods -l app={{ include "promovolve.fullname" . }}-api
+  kubectl -n {{ .Release.Namespace }} exec sts/{{ include "promovolve.fullname" . }}-api -- \
+    wget -qO- localhost:8558/cluster/members
+
+A pod that stays Running and NotReady has not joined. That is the designed
+behaviour, not a hang -- readiness means cluster membership, and the startup
+probe deliberately watches /alive so a slow join is not mistaken for a dead
+process and restarted into a loop.
+{{ if not .Values.config.bannerScriptUrl }}
+WARNING: config.bannerScriptUrl is empty. The banner web component will not
+load, and the custom element will not upgrade -- banners render blank rather
+than failing. Set it to the published bundle URL.
+{{ end }}
+{{- if eq .Values.api.service.type "LoadBalancer" }}
+NOTE: api.service.type is LoadBalancer. On a cluster with no load balancer
+controller the Service stays Pending forever with no other symptom.
+{{- end }}
+
+First admin: visit the dashboard's /setup once. It binds passkeys to
+RP_ID={{ .Values.config.rpId }} permanently -- if that is not the hostname you
+intend to keep, stop here.
