@@ -46,6 +46,10 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "promovolve.fullname" . }}-api
+      {{- with .Values.api.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -104,6 +108,10 @@ spec:
               curl -fsSL --max-time 90 {{ .Values.api.asnDb.url }}
               -o /asn/ip2asn-combined.tsv.gz
               || echo "ASN db download failed -- request hygiene fails open"
+          {{- with .Values.api.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: asn-db
               mountPath: /asn
@@ -118,6 +126,10 @@ spec:
         - name: api
           image: {{ include "promovolve.api.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.api.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.api.service.port }}

@@ -45,6 +45,10 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
+      {{- with .Values.platform.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -61,6 +65,10 @@ spec:
         - name: platform
           image: {{ include "promovolve.platform.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.platform.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.platform.service.port }}

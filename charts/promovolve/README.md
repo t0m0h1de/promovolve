@@ -68,6 +68,23 @@ repository and in `helm get values`.
 **`imagePullPolicy: IfNotPresent`, not `Always`.** `Always` is right for a
 mutable `:dev` tag and wrong once a tag or a digest is pinned.
 
+**Every pod runs as non-root, under Pod Security `restricted`.** Upstream's
+manifests set no security context, so the api and the bundled database run as
+root and keep every default capability. Here:
+
+- the api runs as `pwuser` (uid 1000), the user the Playwright base image
+  creates for unprivileged Chromium, with `fsGroup: 1000` so it can write the
+  DData volume. Its launcher had to become world-executable for that
+  (`Dockerfile.api`)
+- the platform keeps the image's own uid, 65532 (distroless `:nonroot`)
+- the bundled database starts as postgres (uid 70) instead of starting as root
+  to step down to it. No `fsGroup`: the kubelet would make the data directory
+  group-writable, and PostgreSQL refuses to start on one that is
+
+All three drop every capability, forbid privilege escalation and use the
+`RuntimeDefault` seccomp profile. Each is a value (`*.podSecurityContext`,
+`*.securityContext`), so a cluster that needs something else can say so.
+
 **Validation fails the render.** Missing `trackingBaseUrl`, `rpId`,
 `rpOrigins`, `allowedOrigin` or `cdnBaseUrl` is an error rather than a default.
 Promovolve itself refuses to boot without its object store and its LLM key for

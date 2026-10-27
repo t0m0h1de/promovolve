@@ -176,6 +176,25 @@ api:
   tolerations: []
   podAnnotations: {}
 
+  # Pod Security "restricted". The image sets no USER, so without these it runs
+  # as root. 1000 is pwuser, which the Playwright base image creates for
+  # running Chromium unprivileged. fsGroup lets that uid write the DData
+  # volume -- including one that a root-run pod wrote first: OnRootMismatch
+  # walks it once, while the volume's group is still not 1000. The ASN init
+  # container runs under the same settings.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: [ALL]
+
 # ---------------------------------------------------------------------------
 # Platform tier -- the Go dashboard / BFF
 # ---------------------------------------------------------------------------
@@ -200,6 +219,16 @@ platform:
   nodeSelector: {}
   tolerations: []
   podAnnotations: {}
+
+  # Pod Security "restricted". The image is distroless :nonroot, uid 65532.
+  podSecurityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: [ALL]
 
 # ---------------------------------------------------------------------------
 # Not here: the singleton tier
@@ -260,6 +289,26 @@ postgresql:
       memory: 512Mi
     limits:
       memory: 2Gi
+
+  # Pod Security "restricted". The image's entrypoint starts as root only to
+  # chown the data directory and step down to postgres, uid 70 in this Alpine
+  # image; started as 70 it skips both and runs. That needs a volume root the
+  # pod can create pgdata in -- local-path's directories are 0777 -- or a
+  # pgdata an earlier root-started pod already handed to 70.
+  #
+  # No fsGroup, though it looks like the fix for a root-owned volume: the
+  # kubelet's walk makes every directory group-writable, and PostgreSQL
+  # refuses to start on a data directory that is.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 70
+    runAsGroup: 70
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: [ALL]
 
 # ---------------------------------------------------------------------------
 # Application configuration
