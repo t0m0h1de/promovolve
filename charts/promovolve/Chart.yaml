@@ -6,12 +6,12 @@ description: >-
 type: application
 
 # Chart version. Bumped when the templates change.
-version: 0.1.1
+version: 0.1.1-homelab
 
 # The application version the default image tags point at. Override
 # image.api.tag / image.platform.tag to deploy something else; pin
 # image.*.digest to deploy something exactly.
-appVersion: "0.1.1"
+appVersion: "0.1.1-homelab"
 
 home: https://github.com/promovolve/promovolve
 sources:
