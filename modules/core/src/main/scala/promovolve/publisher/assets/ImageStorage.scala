@@ -99,33 +99,102 @@ trait ImageStorage {
     Future.successful(None)
 }
 
-/** Cloudflare R2 storage using Pekko Connectors S3 (S3-compatible, zero egress fees). */
+object ImageStorage {
+
+  val SvgMime = "image/svg+xml"
+
+  /**
+   * Media types a presigned upload admits: images and video. Neither is
+   * rendered as a document by browsers, so a hostile body can't become a
+   * live page on the CDN origin. (SVG is the scriptable exception — see
+   * [[putContentType]].)
+   */
+  def uploadable(mimeType: String): Boolean =
+    mimeType.startsWith("image/") || mimeType.startsWith("video/")
+
+  /**
+   * Content-Type a presigned PUT must carry (it is signed into the URL).
+   * SVG can carry script, so it lands as an opaque download until
+   * register runs SvgSanitizer and rewrites it as image/svg+xml; an SVG
+   * that is never registered stays a harmless download.
+   */
+  def putContentType(mimeType: String): String =
+    if (mimeType == SvgMime) "application/octet-stream" else mimeType
+
+  /** Object-key extension for a media type (`assets/<hash>.<ext>`). */
+  def extFor(mimeType: String): String = mimeType match {
+    case "image/png"  => "png"
+    case "image/jpeg" => "jpg"
+    case "image/gif"  => "gif"
+    case "image/webp" => "webp"
+    case SvgMime      => "svg"
+    case "video/mp4"  => "mp4"
+    case "video/webm" => "webm"
+    case _            => "bin"
+  }
+
+  /** Prefer Wrangler's local R2 simulation when explicitly configured. */
+  def fromEnv()(using system: ActorSystem[?]): Option[ImageStorage] =
+    LocalR2ImageStorage.fromEnv().orElse(R2ImageStorage.fromEnv())
+}
+
+/**
+ * S3-compatible object storage. Cloudflare R2 by default — zero egress fees,
+ * and its endpoint is derived from the account id so nothing else needs
+ * configuring for it.
+ *
+ * `endpoint` exists so the same code can address any S3-compatible server.
+ * It does NOT relax the requirement that object storage be configured: the
+ * caller still refuses to boot without credentials, for the reasons in
+ * HttpBootstrap. It only widens what is allowed to satisfy that requirement.
+ */
 final class R2ImageStorage(
     accountId: String,
     accessKeyId: String,
     secretAccessKey: String,
-    bucket: String
+    bucket: String,
+    endpoint: String = "",
+    region: String = "auto"
 )(using system: ActorSystem[?]) extends ImageStorage {
 
   private given ExecutionContext = system.executionContext
 
-  // Configure S3 settings for R2
+  /** An empty endpoint reproduces the previous behaviour exactly. */
+  private val endpointUrl: String =
+    if (endpoint.nonEmpty) endpoint.stripSuffix("/")
+    else s"https://$accountId.r2.cloudflarestorage.com"
+
+  // Scheme and authority, for the hand-rolled SigV4 below.
+  //
+  // getAuthority rather than getHost, because the signed `host` header has to
+  // carry a non-default port. Sign "minio:9000" as "minio" and the server
+  // recomputes a different signature and answers SignatureDoesNotMatch — which
+  // reads as bad credentials rather than as a port that was dropped.
+  private val endpointUri = java.net.URI.create(endpointUrl)
+  private val endpointScheme = Option(endpointUri.getScheme).getOrElse("https")
+  private val endpointAuthority = Option(endpointUri.getAuthority).getOrElse(
+    throw new IllegalArgumentException(s"S3 endpoint has no host: $endpointUrl")
+  )
+
   private val s3Settings: S3Settings = S3Settings()
-    .withEndpointUrl(s"https://$accountId.r2.cloudflarestorage.com")
-    .withAccessStyle(org.apache.pekko.stream.connectors.s3.AccessStyle.PathAccessStyle) // R2 requires path-style
+    .withEndpointUrl(endpointUrl)
+    // Path-style is what R2 requires, and what a self-hosted server on a bare
+    // hostname or an IP address can serve — virtual-hosted style needs a
+    // wildcard DNS record per bucket.
+    .withAccessStyle(org.apache.pekko.stream.connectors.s3.AccessStyle.PathAccessStyle)
     .withCredentialsProvider(
       StaticCredentialsProvider.create(
         AwsBasicCredentials.create(accessKeyId, secretAccessKey)
       )
     )
     .withS3RegionProvider(new AwsRegionProvider {
-      override def getRegion: Region = Region.of("auto")
+      override def getRegion: Region = Region.of(region)
     })
 
   private val s3Attributes = S3Attributes.settings(s3Settings)
 
   def store(hash: String, bytes: Array[Byte], mimeType: String): Future[String] = {
-    val ext = mimeToExt(mimeType)
+    val ext = ImageStorage.extFor(mimeType)
     val s3Key = s"assets/$hash.$ext"
     val contentType = org.apache.pekko.http.scaladsl.model.ContentType.parse(mimeType).toOption
       .getOrElse(org.apache.pekko.http.scaladsl.model.ContentTypes.`application/octet-stream`)
@@ -214,16 +283,6 @@ final class R2ImageStorage(
       .map(bs => Some(bs.toArray))
       .recover { case _ => None }
 
-  private def mimeToExt(mimeType: String): String = mimeType match {
-    case "image/png"  => "png"
-    case "image/jpeg" => "jpg"
-    case "image/gif"  => "gif"
-    case "image/webp" => "webp"
-    case "video/mp4"  => "mp4"
-    case "video/webm" => "webm"
-    case _            => "bin"
-  }
-
   /**
    * Hand-rolled S3 SigV4 query-string signing for presigned PUT URLs.
    * Pekko-connectors-s3 1.2.0 doesn't expose a presigner; pulling AWS
@@ -238,11 +297,15 @@ final class R2ImageStorage(
       mimeType: String,
       ttlSeconds: Int
   ): Future[(String, String)] = Future {
-    val ext = mimeToExt(mimeType)
+    val ext = ImageStorage.extFor(mimeType)
     val s3Key = s"assets/$hash.$ext"
-    val region = "auto"
+    // Content-Type is SIGNED: R2 serves an object with whatever type its
+    // PUT carried, so an unsigned header let an uploader presign as
+    // image/png and PUT text/html — a live page on the CDN origin.
+    val putType = ImageStorage.putContentType(mimeType)
     val service = "s3"
-    val host = s"$accountId.r2.cloudflarestorage.com"
+    // region comes from the constructor; host and scheme from the endpoint.
+    val host = endpointAuthority
     val now = java.time.Instant.now()
     val amzDate = now.atZone(java.time.ZoneOffset.UTC)
       .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'"))
@@ -259,15 +322,16 @@ final class R2ImageStorage(
       "X-Amz-Credential" -> credential,
       "X-Amz-Date" -> amzDate,
       "X-Amz-Expires" -> ttlSeconds.toString,
-      "X-Amz-SignedHeaders" -> "host"
+      "X-Amz-SignedHeaders" -> "content-type;host"
     ).sortBy(_._1)
     val canonicalQuery = queryPairs
       .map { case (k, v) => s"${rfc3986Encode(k)}=${rfc3986Encode(v)}" }
       .mkString("&")
 
-    // Only host is signed for query-string presigning.
-    val canonicalHeaders = s"host:$host\n"
-    val signedHeaders = "host"
+    // Signed headers, lexically ordered. The browser's PUT must send
+    // exactly `putType` or R2 rejects the signature.
+    val canonicalHeaders = s"content-type:$putType\nhost:$host\n"
+    val signedHeaders = "content-type;host"
 
     // Payload hash for presigned PUT is the literal "UNSIGNED-PAYLOAD"
     // — caller's actual body isn't part of the signature.
@@ -294,7 +358,7 @@ final class R2ImageStorage(
     val kSigning = hmacSha256(kService, "aws4_request")
     val signature = hmacSha256(kSigning, stringToSign).map("%02x".format(_)).mkString
 
-    val url = s"https://$host$path?$canonicalQuery&X-Amz-Signature=$signature"
+    val url = s"$endpointScheme://$host$path?$canonicalQuery&X-Amz-Signature=$signature"
     (url, s3Key)
   }(using system.executionContext)
 
@@ -336,18 +400,42 @@ final class R2ImageStorage(
 object R2ImageStorage {
 
   /**
-   * Create from environment variables:
-   * - R2_ACCOUNT_ID
+   * Create from environment variables.
+   *
+   * Required:
    * - R2_ACCESS_KEY_ID
    * - R2_SECRET_ACCESS_KEY
    * - R2_BUCKET
+   * - R2_ACCOUNT_ID      unless S3_ENDPOINT_URL is set; it exists only to
+   *                      build R2's endpoint, and an S3-compatible server
+   *                      that is not R2 has no account id to put here
+   *
+   * Optional:
+   * - S3_ENDPOINT_URL    e.g. https://minio.example:9000. Unset means R2
+   * - S3_REGION          defaults to "auto", which is what R2 wants
+   *
+   * Returning None when credentials are absent is load-bearing: the caller
+   * turns it into a boot failure rather than falling back to storage that
+   * loses creatives on restart.
    */
   def fromEnv()(using system: ActorSystem[?]): Option[R2ImageStorage] = {
+    val endpoint = sys.env.get("S3_ENDPOINT_URL").map(_.trim).filter(_.nonEmpty)
+    val region = sys.env.get("S3_REGION").map(_.trim).filter(_.nonEmpty).getOrElse("auto")
     for {
-      accountId <- sys.env.get("R2_ACCOUNT_ID")
+      accountId <- endpoint match {
+        case Some(_) => Some(sys.env.getOrElse("R2_ACCOUNT_ID", ""))
+        case None    => sys.env.get("R2_ACCOUNT_ID")
+      }
       accessKeyId <- sys.env.get("R2_ACCESS_KEY_ID")
       secretAccessKey <- sys.env.get("R2_SECRET_ACCESS_KEY")
       bucket <- sys.env.get("R2_BUCKET")
-    } yield new R2ImageStorage(accountId, accessKeyId, secretAccessKey, bucket)
+    } yield new R2ImageStorage(
+      accountId,
+      accessKeyId,
+      secretAccessKey,
+      bucket,
+      endpoint.getOrElse(""),
+      region
+    )
   }
 }

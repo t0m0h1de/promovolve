@@ -47,6 +47,9 @@ category/onsen/    cats=[] missing                          places=[Toyooka(GN18
 ```
 
 `hit` — an accepted answer (or something more specific) is present.
+A category that is a *sibling* of an accepted one (Europe Travel beside the
+expected Asia Travel) makes the cell `WRONG` even when the accepted one is
+there too; unrelated extras are not judged.
 `broad` — the model stopped at a parent of what we wanted (Travel for a Spas
 page): serves broader campaigns, loses the specific ones. `missing` — nothing
 came back where something should have. `WRONG` / `INVENTED` — answered
@@ -61,3 +64,31 @@ alternatives generous (`653|664` = "anywhere in Travel is fine") and reserve
 thousand you don't. Category ids: `modules/core/src/main/resources/iab_content_taxonomy/3_0.tsv`;
 place codes: search the dashboard's place picker, or `Places.search` — the
 chip shows the code.
+
+## Campaign side (#422)
+
+Campaigns get their content categories from a different call:
+`CategoryVerificationClient.verifyText` reads the landing page (or the
+creative's own text) and the declared ad-product category, and answers
+"which readers would want this product". Ads match only where both sides
+agree, so this side gets measured too.
+
+```sh
+export GEMINI_API_KEY=…
+scripts/classify-eval/run-campaigns.sh                       # production model (3.5-flash-lite)
+GEMINI_CAMPAIGN_MODEL=<candidate> scripts/classify-eval/run-campaigns.sh --no-extract --baseline scripts/classify-eval/out/campaigns-gemini-3.5-flash-lite.json
+```
+
+`campaigns.tsv` is `url  ad-product-id  accepted-content-ids  note` (the
+landing pages from production's `creative` table; ad-product id empty =
+none, which is what production sends today), scored
+with the page eval's rule minus its sibling check (Budget Travel beside Air
+Travel is breadth on a campaign, not a contradiction). The count column shows how many categories each
+answer had: a wide answer spends the campaign's budget on loosely related
+pages, and the score does not catch that. Text comes from `extract.mjs`
+(8,000 chars); production reads up to 30,000 of the landing page, so very
+long pages are judged on their opening.
+
+Production reads the model from `GEMINI_CAMPAIGN_MODEL` (default
+`CategoryVerificationClient.DefaultModel`). Change the default only after
+this eval says the new model is at least as good.

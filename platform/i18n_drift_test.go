@@ -32,6 +32,9 @@ import (
 // them, so they are exempt from the unused-key check. Keep this list
 // honest — every entry should name where the dynamic lookup happens.
 var dynamicKeys = map[string]string{
+	"Released: the site was not verified within 14 days of approval. Add it again to retry.": "pages.go publisher Sites request card i18n.T(lang, sr.RejectReason) — siterequest.UnverifiedReleaseReason",
+	"Released by an administrator: the site was not verified. Add it again to retry.":        "pages.go publisher Sites request card i18n.T(lang, sr.RejectReason) — siterequest.ManualReleaseReason",
+	"Removed by an administrator. Contact the operator before adding it again.":              "pages.go publisher Sites request card i18n.T(lang, sr.RejectReason) — siterequest.AdminRemovedReason",
 	"advertiser":                     "account-preferences.html landing-side radios ({{t .}})",
 	"violence":                       "creatives.html / approval.html safety flags ({{t $a}})",
 	"hate_speech":                    "creatives.html / approval.html safety flags ({{t $a}})",
@@ -44,11 +47,11 @@ var dynamicKeys = map[string]string{
 	"Draft":                          "creatives.html {{t .ActiveStatus}}",
 	"active":                         "creatives.html {{t .Status}} legacy fallback (core enum)",
 	"paused":                         "creatives.html {{t .Status}} legacy fallback (core enum)",
-	"topup":                          "wallet.html {{t .Kind}} (billing.TxnKind)",
+	"Top-up":                         "wallet.html {{t .Kind}} (billing.TxnKind)",
 	"settlement":                     "wallet.html {{t .Kind}} (billing.TxnKind)",
-	"payout":                         "wallet.html {{t .Kind}} (billing.TxnKind)",
-	"adjustment":                     "wallet.html {{t .Kind}} (billing.TxnKind)",
-	"refund":                         "wallet.html {{t .Kind}} (billing.TxnKind)",
+	"Payout":                         "wallet.html {{t .Kind}} (billing.TxnKind)",
+	"Adjustment":                     "wallet.html {{t .Kind}} (billing.TxnKind)",
+	"Refund":                         "wallet.html {{t .Kind}} (billing.TxnKind)",
 	"email already registered":       "handler.go handleLoginPost sentinel switch (i18n.T(lang, msg))",
 	"invalid credentials":            "handler.go handleLoginPost sentinel switch (i18n.T(lang, msg))",
 	"pending":                        "payout/site-request status pills ({{t .Status}})",

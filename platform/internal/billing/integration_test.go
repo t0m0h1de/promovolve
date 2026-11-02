@@ -1,66 +1,17 @@
 package billing
 
-// Full-cycle ledger test against a real Postgres, gated on
-// BILLING_TEST_DATABASE_URL (skipped otherwise). Everything runs inside a
-// throwaway schema so it is safe to point at the dev database:
+// Full-cycle ledger test against a real Postgres. The server, the per-test
+// schema and the skip-without-the-tag behavior live in
+// pgtest_integration_test.go / pgtest_default_test.go:
 //
-//   BILLING_TEST_DATABASE_URL='postgres://promovolve:promovolve@localhost:5432/promovolve?sslmode=disable' \
-//     go test ./internal/billing/
+//   go test -tags=integration ./internal/billing
 
 import (
 	"context"
 	"errors"
-	"fmt"
-	"os"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgxpool"
-
-	"github.com/hanishi/promovolve/platform/internal/db"
 )
-
-func testPool(t *testing.T) *pgxpool.Pool {
-	t.Helper()
-	url := os.Getenv("BILLING_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("BILLING_TEST_DATABASE_URL not set; skipping ledger integration test")
-	}
-	ctx := context.Background()
-
-	schema := fmt.Sprintf("billing_test_%d", os.Getpid())
-
-	admin, err := pgxpool.New(ctx, url)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	if _, err := admin.Exec(ctx, "DROP SCHEMA IF EXISTS "+schema+" CASCADE"); err != nil {
-		t.Fatalf("drop stale schema: %v", err)
-	}
-	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
-		t.Fatalf("create schema: %v", err)
-	}
-	t.Cleanup(func() {
-		admin.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+schema+" CASCADE")
-		admin.Close()
-	})
-
-	cfg, err := pgxpool.ParseConfig(url)
-	if err != nil {
-		t.Fatalf("parse config: %v", err)
-	}
-	cfg.ConnConfig.RuntimeParams["search_path"] = schema
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatalf("connect with search_path: %v", err)
-	}
-	t.Cleanup(pool.Close)
-
-	if err := db.Migrate(pool); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	return pool
-}
 
 func TestLedgerFullCycle(t *testing.T) {
 	pool := testPool(t)
@@ -383,5 +334,63 @@ func TestAdjustRequiresMemoAndBalance(t *testing.T) {
 	// The credit is negative platform revenue — the operator gave margin away.
 	if rec.RevenueMicros != -1_000_000 {
 		t.Fatalf("revenue = %d, want -1000000", rec.RevenueMicros)
+	}
+}
+
+// Endorsed: the operator has credited the wallet at least once (a top-up
+// or a credit adjustment). Spending back down to zero never un-endorses.
+func TestWalletEndorsed(t *testing.T) {
+	pool := testPool(t)
+	svc := NewService(pool)
+	ctx := context.Background()
+
+	endorsed := func(id string) bool {
+		t.Helper()
+		ok, err := svc.WalletEndorsed(ctx, id)
+		if err != nil {
+			t.Fatalf("endorsed %s: %v", id, err)
+		}
+		return ok
+	}
+
+	if endorsed("advNone") {
+		t.Fatal("advertiser with no account is endorsed")
+	}
+	// An account row alone (settlement creates one) is not money.
+	if _, err := svc.EnsureAccount(ctx, OwnerAdvertiser, "advRow"); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if endorsed("advRow") {
+		t.Fatal("bare account row is endorsed")
+	}
+
+	if _, err := svc.RecordTopup(ctx, TopupParams{
+		AdvertiserID: "advTop", AmountMicros: 5_000_000, IdempotencyKey: "endorse-top",
+	}); err != nil {
+		t.Fatalf("topup: %v", err)
+	}
+	if !endorsed("advTop") {
+		t.Fatal("topped-up advertiser not endorsed")
+	}
+
+	if _, _, err := svc.Adjust(ctx, AdjustParams{
+		Kind: TxnAdjustment, Memo: "signup credit", IdempotencyKey: "endorse-adj",
+		Legs: []Leg{
+			{OwnerType: OwnerAdvertiser, OwnerID: "advAdj", AmountMicros: -1_000_000},
+			{OwnerType: OwnerPlatform, OwnerID: PlatformRevenue, AmountMicros: 1_000_000},
+		},
+	}); err != nil {
+		t.Fatalf("adjust: %v", err)
+	}
+	if !endorsed("advAdj") {
+		t.Fatal("credit adjustment did not endorse")
+	}
+
+	// Refunded to zero: still endorsed (the lock is for never-funded only).
+	if _, err := svc.RefundAdvertiser(ctx, "advTop", 5_000_000, "closing", "", "endorse-refund"); err != nil {
+		t.Fatalf("refund: %v", err)
+	}
+	if !endorsed("advTop") {
+		t.Fatal("spent-down advertiser lost endorsement")
 	}
 }

@@ -1,10 +1,10 @@
 {{define "content"}}
-<div class="max-w-4xl">
+<div>
   <h1 class="page-title">{{t "Account Requests"}}</h1>
   <p class="page-sub">{{t "Review who gets access to this platform. Approval provisions the account on the ad server."}}</p>
 
   {{if .Error}}
-  <div class="bg-red-50 border border-red-200 text-red-700 rounded-lg p-3 mt-6 text-sm">{{.Error}}</div>
+  <div class="notice notice-error p-3 mt-6 text-sm" data-lead="{{t "Error:"}}">{{.Error}}</div>
   {{end}}
 
   {{if and (not .AdminRequests) (not .AdminOrgSideRequests)}}
@@ -22,13 +22,13 @@
     <div class="card">
       <div class="flex items-start justify-between gap-4">
         <div>
-          <div class="flex items-center gap-2 mb-1">
+          <div class="flex flex-wrap items-center gap-2 mb-1">
             <h2 class="font-semibold text-lg">{{if .OrgName}}{{.OrgName}}{{else}}@{{.OrgDomain}}{{end}}</h2>
             <span class="badge {{if eq .Side "publisher"}}badge-info{{else}}badge-success{{end}}">{{t "wants %s" (t (printf "%s" .Side))}}</span>
           </div>
           <p class="text-sm text-gray-500">@{{.OrgDomain}} · {{if .RequesterEmail}}{{t "requested by %s" .RequesterEmail}}{{else}}{{t "requested by %s" (t "(removed member)")}}{{end}}</p>
         </div>
-        <span class="text-xs text-gray-400 whitespace-nowrap">{{.CreatedAt.Format "2006-01-02 15:04"}}</span>
+        <span class="text-xs text-gray-500 whitespace-nowrap">{{.CreatedAt.Format "2006-01-02 15:04"}}</span>
       </div>
       {{if .Message}}
       <p class="mt-3 text-sm text-gray-600 bg-gray-50 border rounded-md p-3">{{.Message}}</p>
@@ -54,20 +54,20 @@
     <div class="card">
       <div class="flex items-start justify-between gap-4">
         <div>
-          <div class="flex items-center gap-2 mb-1">
+          <div class="flex flex-wrap items-center gap-2 mb-1">
             <h2 class="font-semibold text-lg">{{.Company}}</h2>
             <span class="badge {{if eq .Role "publisher"}}badge-info{{else}}badge-success{{end}}">{{t .Role}}</span>
           </div>
           <p class="text-sm text-gray-500">
-            <a href="{{.Website}}" target="_blank" rel="noopener noreferrer" class="text-brand hover:underline">{{.Website}}</a>
+            <a href="{{.Website}}" target="_blank" rel="noopener noreferrer" class="text-brand-ink hover:underline">{{.Website}}</a>
           </p>
         </div>
-        <span class="text-xs text-gray-400 whitespace-nowrap">{{.RequestedAt}}</span>
+        <span class="text-xs text-gray-500 whitespace-nowrap">{{.RequestedAt}}</span>
       </div>
 
       <dl class="grid grid-cols-2 gap-x-6 gap-y-2 mt-4 text-sm">
-        <div><dt class="text-gray-400">{{t "Contact"}}</dt><dd>{{.Contact}}</dd></div>
-        <div><dt class="text-gray-400">{{t "Email"}}</dt><dd>{{.Email}}</dd></div>
+        <div><dt class="text-gray-500">{{t "Contact"}}</dt><dd>{{.Contact}}</dd></div>
+        <div><dt class="text-gray-500">{{t "Email"}}</dt><dd>{{.Email}}</dd></div>
       </dl>
 
       {{if .Message}}

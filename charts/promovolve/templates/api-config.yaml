@@ -1,0 +1,62 @@
+{{- include "promovolve.validate" . -}}
+{{/*
+Public configuration for the api tier.
+
+Not secret, and in a ConfigMap on purpose: a deployment reproduces from what is
+committed. The values that are secret live in the Secret named by
+.Values.secrets.api, which this chart does not create.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "promovolve.fullname" . }}-api-config
+  labels:
+    {{- include "promovolve.labels" . | nindent 4 }}
+data:
+  CDN_BASE_URL: {{ .Values.config.cdnBaseUrl | quote }}
+  TRACKING_BASE_URL: {{ .Values.config.trackingBaseUrl | quote }}
+  BANNER_SCRIPT_URL: {{ .Values.config.bannerScriptUrl | quote }}
+
+  JDBC_URL: {{ include "promovolve.jdbcUrl" . | quote }}
+  JDBC_USER: {{ .Values.postgresql.user | quote }}
+
+  DDATA_DIR: /data/ddata
+  HTTP_HOST: 0.0.0.0
+  HTTP_PORT: {{ .Values.api.service.port | quote }}
+
+  ENABLE_TEST_ROUTES: {{ .Values.config.enableTestRoutes | quote }}
+  CHROMIUM_NO_SANDBOX: {{ .Values.config.chromiumNoSandbox | quote }}
+  CRAWLER_NUM_WORKERS: {{ .Values.config.crawlerNumWorkers | quote }}
+  FLOOR_OBSERVATION_INTERVAL_SECONDS: {{ .Values.config.floorObservationIntervalSeconds | quote }}
+
+  GEMINI_TOKENS_PER_MINUTE: {{ .Values.config.gemini.tokensPerMinute | quote }}
+  GEMINI_BURST: {{ .Values.config.gemini.burst | quote }}
+
+  # Derived from api.replicas, never configured. See promovolve.api.requiredContactPoints.
+  PEKKO_BOOTSTRAP_REQUIRED_CONTACT_POINTS: {{ include "promovolve.api.requiredContactPoints" . | quote }}
+  {{- range $k, $v := .Values.config.extraEnv }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}
+---
+{{/*
+The HOCON overlay and, optionally, debug logging.
+
+Upstream generates this with kustomize's configMapGenerator, which appends a
+content hash to the name so that editing the file rolls the pods. Helm has no
+equivalent, so the pod templates carry a checksum annotation instead -- without
+one, changing this file updates the ConfigMap and leaves the running pods on
+the old content until something else restarts them.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "promovolve.fullname" . }}-app-conf
+  labels:
+    {{- include "promovolve.labels" . | nindent 4 }}
+data:
+  {{ include "promovolve.api.configFile" . }}: |
+    {{- include "promovolve.api.appConf" . | nindent 4 }}
+  {{- if .Values.api.debugLogging }}
+  logback-debug.xml: |
+    {{- .Files.Get "files/logback-debug.xml" | nindent 4 }}
+  {{- end }}
