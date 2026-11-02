@@ -1,20 +1,23 @@
 import scala.collection.Seq
 
 ThisBuild / organization := "promovolve"
-scalaVersion := "3.7.4"
+ThisBuild / scalaVersion := "3.9.0"
 val pekkoVersion                = "1.4.0"
 val pekkoHttpVersion            = "1.2.0"
 val pekkoProjectionVersion      = "1.1.0"
 val pekkoManagementVersion      = "1.2.1"
-val logbackVersion              = "1.5.18"
+val logbackVersion              = "1.6.3"
 val pekkoQuartzSchedulerVersion = "1.3.0-pekko-1.1.x"
 val tapirVersion = "1.13.3"
+// Pinned with the image it starts (see PostgresTestContainer).
+val testcontainersVersion       = "1.21.3"
 
 ThisBuild / scalacOptions :=
   Seq(
     "-feature",
     "-unchecked",
     "-deprecation",
+    "-Werror",
     "-encoding", "utf8",
     "-Xmax-inlines:128",
     // Permanent guardrails for the two unused-symbol categories with the
@@ -30,10 +33,11 @@ ThisBuild / scalacOptions :=
 Compile / run / fork := true
 Compile / run / connectInput := true
 
-// JVM flags for Java 21+ compatibility (LMDB durable DData requires access to java.nio internals)
+// LMDB durable DData uses java.nio internals and JNI on Java 25.
 Compile / run / javaOptions ++= Seq(
   "--add-opens", "java.base/java.nio=ALL-UNNAMED",
-  "--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED"
+  "--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED",
+  "--enable-native-access=ALL-UNNAMED"
 )
 
 lazy val root = (project in file("."))
@@ -62,7 +66,9 @@ lazy val browser = (project in file("modules/browser"))
   .settings(commonSettings)
 
 lazy val api = (project in file("modules/api"))
-  .dependsOn(core)
+  // test->test as well: api's specs use the shared `promovolve.Integration`
+  // tag that lives in core's test sources.
+  .dependsOn(core % "compile->compile;test->test")
   .enablePlugins(JavaAppPackaging)
   .settings(
     commonSettings,
@@ -81,10 +87,11 @@ lazy val api = (project in file("modules/api"))
     Compile / run / connectInput := true,
     // Pass environment variables to forked JVM
     Compile / run / envVars ++= sys.env,
-    // JVM flags for Java 21+ compatibility (LMDB durable DData requires access to java.nio internals)
+    // LMDB durable DData uses java.nio internals and JNI on Java 25.
     Compile / run / javaOptions ++= Seq(
       "--add-opens", "java.base/java.nio=ALL-UNNAMED",
-      "--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED"
+      "--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED",
+      "--enable-native-access=ALL-UNNAMED"
     ),
     // Fast dev loop (sbt-revolver): `sbt "api / ~reStart"` (scripts/dev.sh)
     // recompiles + restarts the API on every source change — same fork/env as
@@ -95,19 +102,45 @@ lazy val api = (project in file("modules/api"))
     reStart / envVars := sys.env,
     reStart / javaOptions ++= Seq(
       "--add-opens", "java.base/java.nio=ALL-UNNAMED",
-      "--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED"
+      "--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED",
+      "--enable-native-access=ALL-UNNAMED"
     ),
-    // Bake the same --add-opens flags into the `sbt api/stage` launcher
+    // Bake the same LMDB access flags into the `sbt api/stage` launcher
     // (modules/api/target/universal/stage/bin/api) so the container image
     // doesn't have to re-declare them. Used by Dockerfile.api.
     bashScriptExtraDefines ++= Seq(
       """addJava "--add-opens=java.base/java.nio=ALL-UNNAMED"""",
-      """addJava "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED""""
+      """addJava "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED"""",
+      """addJava "--enable-native-access=ALL-UNNAMED""""
+    )
+  )
+
+// Database integration tests (GH #23). DELIBERATELY NOT aggregated by root,
+// so `sbt test` — the deterministic gate CI runs — never reaches it: this
+// project needs Docker, pulls a TimescaleDB image and runs the real
+// docker/init-db.sql. Run it on purpose:
+//
+//   sbt dbIt/test
+//
+// Forked so the container's JDBC pools and the shutdown hook that stops it
+// live in their own JVM, away from the gate's test JVM.
+lazy val dbIt = (project in file("modules/db-it"))
+  .dependsOn(core % "compile->compile;test->test")
+  .settings(
+    commonSettings,
+    publish / skip := true,
+    Test / fork := true,
+    // A forked JVM starts with an EMPTY environment, so Testcontainers cannot
+    // see DOCKER_HOST / the Docker Desktop socket and reports "no Docker
+    // environment" on a machine where Docker is running fine.
+    Test / envVars ++= sys.env,
+    libraryDependencies ++= Seq(
+      "org.testcontainers" % "testcontainers" % testcontainersVersion % Test,
+      "org.testcontainers" % "postgresql"     % testcontainersVersion % Test
     )
   )
 
 lazy val commonSettings = Seq(
-  scalaVersion := "3.7.4",
   libraryDependencies ++= Seq(
     // Pekko
     "org.apache.pekko"       %% "pekko-actor-typed"            % pekkoVersion,
@@ -120,10 +153,11 @@ lazy val commonSettings = Seq(
     "org.apache.pekko"       %% "pekko-http-spray-json"        % pekkoHttpVersion,
     "org.apache.pekko"       %% "pekko-http-xml"               % pekkoHttpVersion,  // Explicit version to avoid conflict with pekko-connectors-s3
     // Persistence (PostgreSQL)
-    "org.apache.pekko"       %% "pekko-persistence-jdbc"       % "1.2.0",
-    "com.typesafe.slick"     %% "slick"                        % "3.5.1",
-    "com.typesafe.slick"     %% "slick-hikaricp"               % "3.5.1",
-    "org.postgresql"          % "postgresql"                   % "42.7.8",
+    "org.apache.pekko"       %% "pekko-persistence-jdbc"       % "1.3.0",
+    // Slick 3.6 crosses the PVP binary-compatibility boundary used by the Pekko JDBC/Projection artifacts.
+    "com.typesafe.slick"     %% "slick"                        % "3.5.2",
+    "com.typesafe.slick"     %% "slick-hikaricp"               % "3.5.2",
+    "org.postgresql"          % "postgresql"                   % "42.7.13",
     // Pekko Projection (for dashboard read-side)
     "org.apache.pekko"       %% "pekko-projection-core"        % pekkoProjectionVersion,
     "org.apache.pekko"       %% "pekko-projection-slick"       % pekkoProjectionVersion,
@@ -131,7 +165,7 @@ lazy val commonSettings = Seq(
     "io.github.samueleresca" %% "pekko-quartz-scheduler"       % pekkoQuartzSchedulerVersion,
     "ch.qos.logback"          % "logback-classic"              % logbackVersion,
     "com.github.jkugiya"     %% "ulid-scala"                   % "1.0.6",
-    "com.microsoft.playwright" % "playwright"                  % "1.54.0",
+    "com.microsoft.playwright" % "playwright"                  % "1.63.0",
     "org.apache.commons"      % "commons-math3"                % "3.6.1",  // Beta distribution for Thompson Sampling
     "com.github.blemale"     %% "scaffeine"                    % "5.3.0",  // Scala wrapper for Caffeine cache
     "com.google.guava"        % "guava"                        % "33.4.8-jre",  // InternetDomainName (public-suffix eTLD+1 for auto-approve trust)
@@ -148,5 +182,12 @@ lazy val commonSettings = Seq(
     "org.apache.pekko"       %% "pekko-testkit"                % pekkoVersion % Test,
     "org.apache.pekko"       %% "pekko-stream-testkit"         % pekkoVersion % Test,
     "org.apache.pekko"       %% "pekko-persistence-testkit"    % pekkoVersion % Test
-  )
+  ),
+  // `sbt test` is the behavioral gate CI runs, so it must be deterministic on
+  // a clean checkout: no credentials, no host tools. Tests that reach a live
+  // LLM provider or shell out to ffmpeg carry the `promovolve.Integration`
+  // tag (see modules/core/src/test/scala/promovolve/TestTags.scala) and are
+  // excluded here. Run them deliberately, keys in the environment:
+  //   sbt "testOnly * -- -n promovolve.Integration"
+  Test / testOptions += Tests.Argument(TestFrameworks.ScalaTest, "-l", "promovolve.Integration")
 )

@@ -30,8 +30,8 @@ See the [README](README.md#repository-layout) for the map. The two build targets
 
 ## Prerequisites
 
-- **JDK 21 and sbt** (Scala 3.7)
-- **Go 1.26+**
+- **JDK 25 and sbt** (Scala 3.9)
+- **Go 1.27+**
 - **GNU Make** (Go platform tasks)
 - **Node.js 24** (to build the Tailwind CSS and the JS ad bundles)
 - **Docker** (local Postgres/TimescaleDB)
@@ -51,7 +51,41 @@ scripts/run-dashboard.sh               # dashboard on :9091
 See the [Self-Hosting guide](docs/guides/self-hosting.md) for the full
 configuration surface.
 
+Development Compose ports default to `127.0.0.1`. For access from other machines,
+set `DEV_BIND_ADDRESS` to a host IP or `0.0.0.0`, restrict network access, and
+replace the example credentials.
+
+Production images use `Dockerfile.api` and `platform/Dockerfile`.
+
 ## Building & testing
+
+### Container checks
+
+CI builds affected production images for arm64 on pull requests, and both images
+on main pushes and manual runs. It checks
+startup, shutdown, browser execution, and embedded assets using disposable local
+services. R2, LLM, and
+production cluster integration are outside these checks; no deployment credentials
+are required, and test containers, volumes, and networks are cleaned up automatically.
+
+On an arm64 Docker host, with JDK 21, Python 3, Buildx, and Docker Compose installed:
+
+```bash
+python3 scripts/test-docker-config.py
+docker buildx build --platform linux/arm64 --load -f Dockerfile.api -t promovolve-api:ci .
+docker buildx build --platform linux/arm64 --load -f platform/Dockerfile -t promovolve-platform:ci platform
+python3 scripts/smoke-docker.py api promovolve-api:ci
+python3 scripts/smoke-docker.py platform promovolve-platform:ci
+```
+
+For a standalone Buildx plugin, set `DOCKER_BUILDX=docker-buildx` when running
+`scripts/test-docker-config.py`.
+
+CI checks Designer asset consistency with `npm run fanout -- --check`. To update
+assets, run `npm run build && npm run fanout` in `platform/creative-designer` and
+commit the output with the source change.
+
+### Application checks
 
 ```bash
 # Scala core
@@ -67,14 +101,68 @@ Run `make -C platform help` to list targets. `build`, `vet`, and `test` can also
 
 Notes:
 
-- **The core test suite has a known-failing baseline** (a handful of
-  pre-existing failures unrelated to most changes). Compare the *set of failing
-  test names* before and after your change — a non-zero exit code alone doesn't
-  mean you broke something. If your change adds a new failure, fix it or explain
-  why.
-- **Integration specs that need API keys skip themselves** when the relevant env
-  var is unset (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`). Never hardcode a key to
-  make one run — read it from the environment (see the existing specs).
+- **`sbt test` must be green, and CI runs it.** There is no known-failing
+  baseline any more: a non-zero exit code means something is broken. If your
+  change makes a test fail, fix it — don't work around it.
+- **Tests that leave the JVM are excluded by tag, not by luck.** Anything that
+  calls a live LLM provider or shells out to a host tool (ffmpeg) carries the
+  `promovolve.Integration` tag from
+  `modules/core/src/test/scala/promovolve/TestTags.scala`, and `build.sbt`
+  excludes that tag from `sbt test`. Run them deliberately, with the relevant
+  keys in the environment:
+
+  ```bash
+  sbt "testOnly * -- -n promovolve.Integration"
+  ```
+
+  Tag any new test of that kind the same way. Never hardcode a key to make one
+  run — read it from the environment (see the existing specs).
+
+- **The Go billing suite has a database half, behind a build tag.** Ledger
+  transactionality, idempotency keys, local-day settlement, fraud holds and
+  clawbacks are SQL behavior, so those tests run against a real Postgres.
+  `make -C platform check` skips them and needs no Docker; CI runs them in a
+  separate mandatory job ("Platform billing (postgres)"). With Docker running:
+
+  ```bash
+  go test -tags=integration ./internal/billing/      # from platform/
+  ```
+
+  `TestMain` starts one pinned Postgres for the package run (Testcontainers)
+  and each test migrates its own throwaway schema with the production
+  `db.Migrate`. To use a server you already have instead of a container —
+  faster on repeat runs, and safe against the dev database since nothing is
+  created outside the per-test schema:
+
+  ```bash
+  BILLING_TEST_DATABASE_URL='postgres://promovolve:promovolve@localhost:5432/promovolve?sslmode=disable' \
+    go test -tags=integration ./internal/billing/
+  ```
+
+  Add database-backed tests to that build tag, never to the Docker-free job.
+
+- **Scala database tests live in their own project, `dbIt`.** They check the
+  Slick repositories against a real TimescaleDB: the traffic-shape snapshot
+  round trip, the `ensureSchema` upgrade of a table written before the
+  weekday/weekend split, and `docker/init-db.sql` applied to an empty
+  database. `dbIt` is deliberately not aggregated by the root project, so
+  `sbt test` never runs it and stays Docker-free. CI runs it as its own job
+  ("Scala persistence (timescaledb)"). With Docker running:
+
+  ```bash
+  sbt dbIt/test
+  ```
+
+  It starts one pinned TimescaleDB container for the run. If Testcontainers
+  cannot find your Docker socket — Docker Desktop on macOS serves an API it
+  rejects — point the tests at a server you started yourself instead. It must
+  be TimescaleDB, because init-db.sql creates the extension:
+
+  ```bash
+  docker run -d --rm -e POSTGRES_USER=promovolve -e POSTGRES_PASSWORD=promovolve \
+    -e POSTGRES_DB=promovolve_test -p 55441:5432 timescale/timescaledb:2.17.2-pg15
+  DB_IT_DATABASE_URL='jdbc:postgresql://localhost:55441/promovolve_test' sbt dbIt/test
+  ```
 
 ## Code style
 

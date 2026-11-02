@@ -24,7 +24,7 @@ import promovolve.publisher.{
   SlickImageAssetRepo,
   SlickPublisherEmailRepo
 }
-import promovolve.publisher.assets.{ ImageStorage, R2ImageStorage }
+import promovolve.publisher.assets.ImageStorage
 import promovolve.advertiser.{ AdvertiserEmailRepo, SlickAdvertiserEmailRepo }
 import scala.util.Try
 import promovolve.taxonomy.CategoryRegistry
@@ -125,23 +125,28 @@ object HttpBootstrap {
       // Any S3-compatible server will do; R2 is the default and the only one
       // that needs no endpoint. S3_ENDPOINT_URL changes where the bytes go,
       // not whether they are required to go somewhere.
-      val imageStorage: ImageStorage = R2ImageStorage.fromEnv()(using system).getOrElse {
+      val imageStorage: ImageStorage = ImageStorage.fromEnv()(using system).getOrElse {
         throw new IllegalStateException(
-          "Object storage not configured. Set R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY " +
-          "and R2_BUCKET, plus either R2_ACCOUNT_ID (Cloudflare R2) or " +
-          "S3_ENDPOINT_URL (any other S3-compatible server)."
+          "Storage not configured. Set R2_LOCAL_URL for local development, or " +
+          "R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY and R2_BUCKET plus either " +
+          "R2_ACCOUNT_ID (Cloudflare R2) or S3_ENDPOINT_URL (any other " +
+          "S3-compatible server)."
         )
       }
-      val storageType = sys.env.get("S3_ENDPOINT_URL").map(_.trim).filter(_.nonEmpty) match {
-        case Some(url) => s"S3-compatible ($url)"
-        case None      => "R2 (Cloudflare)"
+      val storageType = imageStorage match {
+        case _: promovolve.publisher.assets.LocalR2ImageStorage => "R2 (Wrangler local simulation)"
+        case _                                                  =>
+          sys.env.get("S3_ENDPOINT_URL").map(_.trim).filter(_.nonEmpty) match {
+            case Some(url) => s"S3-compatible ($url)"
+            case None      => "R2 (Cloudflare)"
+          }
       }
 
       // Database-backed repos for creative storage (required)
       // NOTE: creativeRepo is passed in from ClusterBootstrap.Repositories to ensure
       // both entities (AdServer) and HTTP routes use the SAME repo instance
       val (imageAssetRepo, advertiserEmailRepo, publisherEmailRepo, advertiserAssetRepo, mountBeaconRepo,
-        audienceObservationRepo) = try {
+        audienceObservationRepo, reachRepo) = try {
         val dbConfig = DatabaseConfig.forConfig[PostgresProfile]("dashboard-projection-db", config)
         val db = dbConfig.db
 
@@ -164,13 +169,17 @@ object HttpBootstrap {
           new promovolve.publisher.SlickAudienceObservationRepo(db)(using system.executionContext)
         audienceRepo.ensureSchema()
 
+        val reachRepo = new promovolve.publisher.SlickReachRepo(db)(using system.executionContext)
+        reachRepo.ensureSchema()
+
         system.log.info(
           "ImageAssetRepo, AdvertiserEmailRepo, PublisherEmailRepo, AdvertiserAssetRepo, MountBeaconRepo initialized (PostgreSQL), ImageStorage: {}",
           storageType)
         system.log.info("Using shared CreativeRepo from ClusterBootstrap.Repositories")
         (imgRepo: ImageAssetRepo, advEmailRepo: AdvertiserEmailRepo, pubEmailRepo: PublisherEmailRepo,
           advAssetRepo: AdvertiserAssetRepo, beaconRepo: promovolve.publisher.MountBeaconRepo,
-          Some(audienceRepo): Option[promovolve.publisher.AudienceObservationRepo])
+          Some(audienceRepo): Option[promovolve.publisher.AudienceObservationRepo],
+          reachRepo: promovolve.publisher.ReachRepo)
       } catch {
         case ex: Exception =>
           system.log.error("Failed to initialize database repos: {}", ex.getMessage)
@@ -317,7 +326,8 @@ object HttpBootstrap {
         mountBeacons = Some(mountBeaconRepo),
         hygiene = requestHygiene,
         engagement = engagementChecker,
-        audienceCounter = audienceCounter
+        audienceCounter = audienceCounter,
+        reach = Some(reachRepo)
       )(using system)
 
       val enableTestRoutes = Try(config.getBoolean("promovolve.enable-test-routes")).getOrElse(false)
@@ -329,8 +339,12 @@ object HttpBootstrap {
       val geminiEnabled = Try(config.getBoolean("promovolve.gemini.enabled")).getOrElse(false)
       val categoryVerificationClient = if (geminiEnabled) {
         sys.env.get("GEMINI_API_KEY").filter(_.nonEmpty).map { apiKey =>
-          system.log.info("CategoryVerificationClient enabled (Gemini)")
-          new promovolve.publisher.assessment.CategoryVerificationClient(apiKey)(using system, system.executionContext)
+          val model = promovolve.publisher.assessment.CategoryVerificationClient.modelFromEnv()
+          system.log.info("CategoryVerificationClient enabled (Gemini {}), rate-limited={}", model,
+            geminiRateLimiter.isDefined)
+          // Shares the Gemini RPM budget with page classification and LP extraction.
+          new promovolve.publisher.assessment.CategoryVerificationClient(apiKey, model = model,
+            rateLimiter = geminiRateLimiter)(using system, system.executionContext)
         }
       } else {
         system.log.info("CategoryVerificationClient disabled (promovolve.gemini.enabled=false)")
@@ -363,9 +377,6 @@ object HttpBootstrap {
           system.log.warn("LPAnalyzer not available: {}", ex.getMessage)
           None
       }
-
-      // Creative assessor: disabled (using CategoryVerificationClient instead)
-      val creativeAssessor: Option[ActorRef[promovolve.publisher.assessment.CreativeAssessor.Command]] = None
 
       // Creative processor: orchestrates image download, banner render, verification
       val creativeProcessor: Option[ActorRef[CreativeProcessor.Command]] = {
@@ -434,7 +445,6 @@ object HttpBootstrap {
         sharding,
         serveIndex,
         categoryVerificationClient,
-        creativeAssessor,
         Some(imageAssetRepo),
         Some(creativeRepo),
         Some(imageStorage),
@@ -454,7 +464,8 @@ object HttpBootstrap {
         lpWorkerNumWorkers = lpWorkerNumWorkers,
         pendingSelectionStore = Some(pendingSelectionStore),
         categoryRegistry = Some(categoryRegistry),
-        audienceObservationRepo = audienceObservationRepo
+        audienceObservationRepo = audienceObservationRepo,
+        campaignDirectory = Some(campaignDirectory)
       )(using system)
 
       // Dashboard routes for advertiser performance data
