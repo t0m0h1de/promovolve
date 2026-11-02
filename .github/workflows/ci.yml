@@ -2,12 +2,9 @@ name: CI
 
 on:
   push:
-    # ci/pins is the CI-generated pin-back branch (scripts/pin-back-pr.sh).
-    # Its PR is opened with GITHUB_TOKEN, which fires no pull_request run,
-    # and workflow_dispatch check runs do not satisfy the main Ruleset's
-    # required checks — so the deploy-key push to this branch is what has
-    # to run CI. Keep it listed here.
-    branches: [main, ci/pins]
+    # Pin-back uses pull_request CI; also running on ci/pins pushes would
+    # duplicate the checks for the same update.
+    branches: [main]
   pull_request:
   # Manual runs exist for the deploy gate: Deploy polls for a CI run on
   # its commit; if a HEAD somehow has none (an older "[skip ci]" pin
@@ -19,6 +16,9 @@ on:
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   helm-chart:
@@ -54,25 +54,37 @@ jobs:
     name: Scala core (sbt)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5.5.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: "25"
           cache: sbt
-      - uses: sbt/setup-sbt@c7d2d6258b4bd0d3ec5129e6b3453199d3c79729 # v1.5.8
+      - uses: sbt/setup-sbt@6158cb0903b8ceeae04f830055f3155e1b6a5ad7 # v1.5.11
 
       # Hard gate — the tree is scalafmt-clean (scala3 dialect); any drift fails
       # CI. Run `sbt scalafmtAll` before committing.
       - name: scalafmt check
         run: sbt scalafmtCheckAll
 
-      # Compile main + test sources. This catches build breaks and type errors.
-      # NOTE: full `sbt test` is intentionally NOT run — the core suite has a
-      # known-failing baseline (see CONTRIBUTING.md); running it here would be
-      # red on arrival. Switch this to `sbt test` once that baseline is green.
-      - name: Compile (main + test)
-        run: sbt "compile; Test/compile"
+      # Behavioral gate. `test` compiles main + test sources and then RUNS the
+      # suite, so an actor/auction/pacing/serialization regression fails here
+      # instead of riding a green compile into a deploy. Tests that need a live
+      # LLM key or a host ffmpeg carry the `promovolve.Integration` tag and are
+      # excluded by build.sbt, which is what keeps this deterministic on a
+      # clean runner — do not add credentials to make more of them run.
+      - name: Test (main + test)
+        run: sbt test
+
+      # Package the production launcher and keep Java 25 native-access needs
+      # explicit. LMDB (jnr-jffi) and Pekko's LZ4 support are classpath code,
+      # so the expected module name is ALL-UNNAMED.
+      - name: Stage API and scan native access
+        run: |
+          sbt "api / Universal / stage"
+          test "$(jnativescan --release 25 --class-path 'modules/api/target/universal/stage/lib/*' --print-native-access)" = ALL-UNNAMED
 
   banner:
     name: Banner (unit + hostile environments)
@@ -81,8 +93,10 @@ jobs:
       run:
         working-directory: platform/banner-component
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: npm
@@ -114,8 +128,10 @@ jobs:
       run:
         working-directory: platform/creative-designer
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: npm
@@ -124,6 +140,8 @@ jobs:
       - run: npx tsc --noEmit
       - run: npx vitest run
       - run: npm run build
+      - name: Verify embedded Designer assets
+        run: npm run fanout -- --check
       # Animation viewability contract: collapsed-banner item motion must
       # HOLD until the banner is ≥50% visible (and the atomic reveal has
       # lifted), then play; reduced-motion poses instantly at render. The
@@ -139,7 +157,7 @@ jobs:
       # runner image ever drops a shared lib, the suite fails naming the
       # missing .so — reinstate deps then, deliberately.
       - name: Cache Playwright browsers
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('platform/creative-designer/package-lock.json') }}
@@ -155,8 +173,10 @@ jobs:
       run:
         working-directory: platform/banner-bootstrap
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: npm
@@ -180,23 +200,25 @@ jobs:
       run:
         working-directory: platform/dashboard-tests
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # Needs BOTH toolchains: the Go preview test renders the real pages
       # (PREVIEW_OUT), then Playwright drives the calendar in Chromium.
       # A render test alone cannot catch this component's failure mode —
       # Alpine boolean-attribute semantics only exist in a browser.
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: platform/go.mod
           cache-dependency-path: platform/go.sum
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: platform/dashboard-tests/package-lock.json
       - run: npm ci
       - name: Cache Playwright browsers
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('platform/dashboard-tests/package-lock.json') }}
@@ -212,10 +234,164 @@ jobs:
       run:
         working-directory: platform
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: platform/go.mod
           cache-dependency-path: platform/go.sum
       # Share first-party build, vet, and race checks with local development.
       - run: make check
+
+  go-billing-db:
+    name: Platform billing (postgres)
+    runs-on: ubuntu-latest
+    # Separate from "Platform (go)" on purpose: this job pulls an image and
+    # starts a container, so it has failure modes (registry, daemon, initdb)
+    # the Docker-free job must never inherit.
+    #
+    # The money suite — transactionality, idempotency, local-day settlement,
+    # holds, clawbacks — used to skip itself unless a database URL happened to
+    # be set, which meant it protected nothing. Here it is mandatory: no
+    # skip-on-missing-Docker fallback, because a silently green money suite is
+    # worse than a red one.
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: platform
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: platform/go.mod
+          cache-dependency-path: platform/go.sum
+      # Testcontainers provisions the pinned Postgres itself (TestMain), so
+      # there is no service container here and no wait-for-healthy shim; on a
+      # startup failure the test binary prints the container logs before
+      # exiting non-zero.
+      - run: go test -tags=integration ./internal/billing/ ./internal/org/ -count=1
+  scala-db:
+    name: Scala persistence (timescaledb)
+    # Not ubuntu-latest: on the ubuntu-26.04 image it now resolves to, Docker
+    # refuses Testcontainers 1.21.3's API version ("client version 1.32 is
+    # too old. Minimum supported API version is 1.40"), and every test here
+    # fails before it starts. Back to ubuntu-latest once Testcontainers
+    # negotiates a newer API.
+    runs-on: ubuntu-24.04
+    # The `dbIt` project is not aggregated by root, so `sbt test` in the Scala
+    # job never reaches these — they need Docker, pull a TimescaleDB image and
+    # apply the real docker/init-db.sql. Nothing here skips on a missing
+    # daemon: a container that will not start fails the job.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: sbt
+      - uses: sbt/setup-sbt@6158cb0903b8ceeae04f830055f3155e1b6a5ad7 # v1.5.11
+      # The Scala job's `scalafmtCheckAll` runs on the ROOT project, which does
+      # not aggregate dbIt — so these sources need their own check or they
+      # drift unformatted.
+      - name: scalafmt check (dbIt)
+        run: sbt dbIt/scalafmtCheckAll
+      - name: Database integration tests
+        run: sbt dbIt/test
+  docker-config:
+    name: Docker contexts and Compose configuration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - run: python3 scripts/test-docker-config.py
+
+  docker-changes:
+    name: Select Docker image checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      # Deploy can retry accumulated changes after a failed run. Every main
+      # commit must therefore validate both images, even on an unrelated push.
+      images: ${{ (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["api","platform"]' || steps.filter.outputs.changes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        if: github.event_name != 'workflow_dispatch' && !(github.event_name == 'push' && github.ref == 'refs/heads/main')
+        with:
+          # PRs use their full diff; pushes use the range delivered to that branch.
+          base: ${{ github.ref }}
+          filters: |
+            api:
+              - '.github/workflows/ci.yml'
+              - 'Dockerfile.api'
+              - '.dockerignore'
+              - 'build.sbt'
+              - 'project/**'
+              # Test sources do not ship in the staged production image.
+              - 'modules/*/src/main/**'
+              - 'docker/init-db.sql'
+              - 'scripts/smoke-docker.py'
+              - 'scripts/docker-smoke/**'
+            platform:
+              - '.github/workflows/ci.yml'
+              - 'platform/Dockerfile'
+              - 'platform/.dockerignore'
+              - 'platform/go.mod'
+              - 'platform/go.sum'
+              - 'platform/**/*.go'
+              - 'platform/templates/**'
+              - 'platform/static/**'
+              - 'platform/help/**'
+              - 'platform/tailwind.config.js'
+              - 'platform/tailwind.input.css'
+              - 'docker/init-db.sql'
+              - 'scripts/smoke-docker.py'
+
+  docker:
+    needs: docker-changes
+    if: needs.docker-changes.outputs.images != '[]'
+    name: Docker (${{ matrix.image }}, arm64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.docker-changes.outputs.images) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build image without publishing
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ matrix.image == 'api' && '.' || 'platform' }}
+          file: ${{ matrix.image == 'api' && 'Dockerfile.api' || 'platform/Dockerfile' }}
+          platforms: linux/arm64
+          push: false
+          load: true
+          tags: promovolve-${{ matrix.image }}:ci
+          # Keep PR build caches separate from deployment caches.
+          cache-from: type=gha,scope=ci-${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=ci-${{ matrix.image }}
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        if: matrix.image == 'api'
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Smoke test packaged runtime
+        run: python3 scripts/smoke-docker.py ${{ matrix.image }} promovolve-${{ matrix.image }}:ci

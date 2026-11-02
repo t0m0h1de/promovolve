@@ -333,7 +333,7 @@ object ApiModels {
       id: String,
       publisherId: String,
       domain: String,
-      status: String, // active, paused
+      status: String, // active, suspended (operator freeze: org, fraud or admin)
       crawlConfig: SiteCrawlConfig,
       slots: Vector[SiteSlotConfig],
       taxonomyIds: Vector[String],
@@ -381,6 +381,11 @@ object ApiModels {
   // if not, which gate stops it. Everything the verdict used is echoed so
   // the answer can be read without a second question: what the page is
   // classified as, what the site declares, the floor in force.
+  // The Delivery check (DeliveryCheck.scala): keys and numbers, copy lives
+  // in the dashboard.
+  case class DeliveryCheckItem(key: String, status: String, detail: Map[String, String])
+  case class DeliveryCheckResponse(items: Vector[DeliveryCheckItem], firstBlocked: Option[String])
+
   case class BidCheckResponse(
       url: String,
       siteId: Option[String],
@@ -535,6 +540,34 @@ object ApiModels {
       revenue: String, // dollars, %.4f
       impressions: Long,
       eCpm: String // dollars per 1k imps, %.4f
+  )
+
+  /**
+   * A site's top pages and top creatives over the publisher's last `days`
+   * local days, by gross revenue then impressions (publisher Overview).
+   * Same event rules as revenue-today: clean events only, dogeared re-views
+   * neither counted nor paid. Revenue is gross — the platform nets it down.
+   */
+  case class SiteTopResponse(
+      siteId: String,
+      sinceUtc: String, // ISO timestamp of the window's first local midnight
+      days: Int,
+      pages: Vector[SiteTopPage],
+      creatives: Vector[SiteTopCreative]
+  )
+
+  /** `page` is the URL without query or fragment; "" = not recorded. */
+  case class SiteTopPage(page: String, impressions: Long, clicks: Long, grossRevenue: String)
+
+  /** Name, domain and asset are "" once the creative is deleted. */
+  case class SiteTopCreative(
+      creativeId: String,
+      name: String,
+      landingDomain: String,
+      assetUrl: String,
+      impressions: Long,
+      clicks: Long,
+      grossRevenue: String
   )
 
   /**
@@ -1182,7 +1215,11 @@ object ApiModels {
   case class PresignedUploadResponse(
       uploadUrl: String, // presigned PUT URL with TTL — empty when alreadyExists
       s3Key: String, // assets/{hash}.{ext}
-      alreadyExists: Boolean // existing image_asset row found; skip the PUT
+      alreadyExists: Boolean, // existing image_asset row found; skip the PUT
+      // Content-Type the PUT must send — it is signed into uploadUrl.
+      // Differs from the requested type only for SVG (lands as
+      // application/octet-stream until register sanitizes it).
+      contentType: Option[String] = None
   )
 
   case class RegisterAssetRequest(
@@ -1286,10 +1323,19 @@ object ApiModels {
       impressions: Long,
       spend: String // dollars, %.4f
   )
+  case class CampaignHourlyRow(
+      campaignId: String,
+      hour: Int, // 0-23, advertiser's zone
+      impressions: Long,
+      spend: String // dollars, %.4f
+  )
   case class AdvertiserHourlyTodayResponse(
       advertiserId: String,
       sinceUtc: String,
-      hours: Vector[HourlyDeliveryRow]
+      hours: Vector[HourlyDeliveryRow],
+      // The same hours split by campaign (the campaigns page's forecast
+      // strips). Option so older readers of this payload are unaffected.
+      byCampaign: Option[Vector[CampaignHourlyRow]] = None
   )
 
   /**
@@ -1380,6 +1426,34 @@ object ApiModels {
       ctaClicks: Long,
       spend: String, // dollars, %.4f
       dogearedImpressions: Long
+  )
+
+  /**
+   * Reach for one (campaign, site) over the requested range (GH #238):
+   * unique browsers that had a viewable impression, counted without viewer
+   * identity. Exact per site; summing sites gives an upper bound.
+   */
+  case class ReachSiteRow(
+      campaignId: String,
+      siteId: String,
+      host: String, // "" when the site row is gone
+      reach: Long,
+      newReach: Long // first time ever on this site
+  )
+
+  /**
+   * Reach for one (advertiser-local day, campaign), summed over sites.
+   * firstInRange: browsers whose first visit inside the requested range was
+   * this day; its running sum is the reach curve.
+   */
+  case class ReachDailyRow(day: String, campaignId: String, reach: Long, newReach: Long, firstInRange: Long)
+  case class AdvertiserReachResponse(
+      advertiserId: String,
+      from: String,
+      to: String,
+      sites: Vector[ReachSiteRow],
+      daily: Vector[ReachDailyRow],
+      coverageFrom: String // first day reach was collected; "" = none yet
   )
   case class AdvertiserReportBreakdownDailyResponse(
       advertiserId: String,

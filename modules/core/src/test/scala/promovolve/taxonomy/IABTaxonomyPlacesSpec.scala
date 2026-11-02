@@ -16,7 +16,7 @@ import promovolve.taxonomy.IABTaxonomy.EmittedPlace
  */
 class IABTaxonomyPlacesSpec extends AnyWordSpec with Matchers {
 
-  private def named(city: String = "", region: String = "", country: String = "") =
+  private def named(city: String = "", region: String = "", country: String) =
     EmittedPlace(
       city = Option(city).filter(_.nonEmpty),
       region = Option(region).filter(_.nonEmpty),
@@ -168,6 +168,30 @@ class IABTaxonomyPlacesSpec extends AnyWordSpec with Matchers {
       prompt should include("SELF-REPORTED, NOT VERIFIED")
       prompt should include("Kyoto")
       prompt should include("ignore it entirely")
+    }
+  }
+
+  // #275: the model files Japan under Europe Travel; the table does not.
+  "withTravelLocations" should {
+    import IABTaxonomy.Selection
+    val Kanazawa = "GN1860243"
+
+    "derive the continent node from the place, replacing the model's guess" in {
+      IABTaxonomy.withTravelLocations(
+        List(Selection("659", 0.9), Selection("670", 0.8)), List(Kanazawa)
+      ).map(_.id) shouldBe List("670", "657")
+    }
+
+    "add Asia Travel to a plain Travel page about Macau" in {
+      IABTaxonomy.withTravelLocations(List(Selection("653", 0.88)), List("MO"))
+        .map(_.id) shouldBe List("653", "657")
+    }
+
+    "leave non-trip pages and placeless pages alone" in {
+      val packing = List(Selection("654", 0.9), Selection("663", 0.8))
+      IABTaxonomy.withTravelLocations(packing, List("JP")) shouldBe packing
+      val guess = List(Selection("659", 0.9))
+      IABTaxonomy.withTravelLocations(guess, Nil) shouldBe guess
     }
   }
 }

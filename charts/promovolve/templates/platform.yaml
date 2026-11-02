@@ -91,6 +91,14 @@ spec:
                 configMapKeyRef:
                   name: {{ include "promovolve.fullname" . }}-api-config
                   key: BANNER_SCRIPT_URL
+            # The ad server's public host, read only to refuse it as a
+            # publisher site (config.ReservedHosts). As in
+            # k8s/platform-deployment.yaml.
+            - name: TRACKING_BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "promovolve.fullname" . }}-api-config
+                  key: TRACKING_BASE_URL
           envFrom:
             - configMapRef:
                 name: {{ include "promovolve.fullname" . }}-platform-config

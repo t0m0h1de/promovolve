@@ -88,7 +88,7 @@ object ClassifyEval {
             case Some(t) =>
               val hint = Option.when(!noHints && t.section.nonEmpty)(t.section)
               val placeHint = Option.when(!noHints && t.place.nonEmpty)(t.place)
-              val attempt = Try(Await.result(classifier.analyze(e.url, t.text, Set.empty, hint, placeHint), 60.seconds))
+              val attempt = Try(Await.result(classifier.analyze(e.url, t.text, hint, placeHint), 60.seconds))
               val r = attempt.fold(
                 ex =>
                   Result(e.url, Vector.empty, Vector.empty, Verdict.Skip, Verdict.Skip,
@@ -125,7 +125,10 @@ object ClassifyEval {
 
   // ── scoring ──────────────────────────────────────────────────────────
 
-  private[tools] def scoreCategories(e: Expect, actual: Vector[String]): Verdict =
+  // siblingsContradict = false for the campaign eval: a campaign's categories
+  // are who should see the ad, and Budget Travel beside Air Travel on a flight
+  // site is breadth, not a contradiction (#429).
+  private[tools] def scoreCategories(e: Expect, actual: Vector[String], siblingsContradict: Boolean = true): Verdict =
     if (e.categories.isEmpty) Verdict.Skip
     else if (e.categoriesMustBeEmpty) { if (actual.isEmpty) Verdict.Ok else Verdict.Invented }
     else if (actual.isEmpty) Verdict.Missing
@@ -143,7 +146,14 @@ object ClassifyEval {
       val hit = actual.exists(a => accepted.contains(a) || ancestorsOf(a).exists(accepted.contains))
       // the model stopped at a parent of what we wanted
       val broad = actual.exists(a => accepted.exists(x => ancestorsOf(x).contains(a)))
-      if (hit) Verdict.Hit else if (broad) Verdict.Broad else Verdict.Wrong
+      // a SIBLING of what we wanted contradicts it — Europe Travel on a
+      // Japan page is wrong even beside Asia Travel. Unrelated extras
+      // (Food & Drink on a travel page) are not judged.
+      def related(a: String, x: String) = a == x || ancestorsOf(a).contains(x) || ancestorsOf(x).contains(a)
+      def parentOf(id: String) = TieredCategory.get(id).flatMap(_.parent).map(_.id)
+      val contradicts = siblingsContradict && actual.exists(a =>
+        parentOf(a).isDefined && !accepted.exists(related(a, _)) && accepted.exists(x => parentOf(x) == parentOf(a)))
+      if (contradicts) Verdict.Wrong else if (hit) Verdict.Hit else if (broad) Verdict.Broad else Verdict.Wrong
     }
 
   private[tools] def scorePlaces(e: Expect, actual: Vector[String]): Verdict =
