@@ -273,7 +273,12 @@ jobs:
       - run: go test -tags=integration ./internal/billing/ ./internal/org/ -count=1
   scala-db:
     name: Scala persistence (timescaledb)
-    runs-on: ubuntu-latest
+    # Not ubuntu-latest: on the ubuntu-26.04 image it now resolves to, Docker
+    # refuses Testcontainers 1.21.3's API version ("client version 1.32 is
+    # too old. Minimum supported API version is 1.40"), and every test here
+    # fails before it starts. Back to ubuntu-latest once Testcontainers
+    # negotiates a newer API.
+    runs-on: ubuntu-24.04
     # The `dbIt` project is not aggregated by root, so `sbt test` in the Scala
     # job never reaches these — they need Docker, pull a TimescaleDB image and
     # apply the real docker/init-db.sql. Nothing here skips on a missing
